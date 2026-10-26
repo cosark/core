@@ -1894,12 +1894,9 @@ __metadata:
     "@rsdoctor/rspack-plugin": "npm:~1.5.13"
     "@rspack/core": "npm:~2.1.10"
     lit: "npm:^3.3.1"
-    maplibre-gl: "npm:~5.19.0"
-    moment: "npm:^2.29.4"
-    reselect: "npm:^5.2.0"
     maplibre-gl: "npm:~6.8.0"
     moment: "npm:^2.31.0"
-    reselect: "npm:^4.1.8"
+    reselect: "npm:^5.2.0"
   languageName: unknown
   linkType: soft
 
