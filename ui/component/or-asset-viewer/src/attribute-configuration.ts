@@ -849,7 +849,10 @@ function showImportResultDialog(host: Node, preview: AttributeConfigurationImpor
 /** Reports a document that cannot be imported, with whatever the server could tell about it. */
 function showImportFailureDialog(host: Node, error: unknown) {
   const preview = getFailurePreview(error);
-  const message = preview ? i18next.t(`attributeConfiguration.failure.${preview.failure}`) : i18next.t("errorOccurred");
+  const forbidden = (error as { response?: { status?: number } })?.response?.status === 403;
+  const message = preview
+    ? i18next.t(`attributeConfiguration.failure.${preview.failure}`)
+    : i18next.t(forbidden ? "attributeConfiguration.forbidden" : "errorOccurred");
 
   showErrorDialog(
     host,

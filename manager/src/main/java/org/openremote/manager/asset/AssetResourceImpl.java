@@ -498,16 +498,7 @@ public class AssetResourceImpl extends ManagerWebResource implements AssetResour
       throw new WebApplicationException(NOT_FOUND);
     }
 
-    if (!isRealmActiveAndAccessible(storageAsset.getRealm())) {
-      LOG.fine(
-          "Realm '"
-              + storageAsset.getRealm()
-              + "' is nonexistent, inactive or inaccessible: username="
-              + getUsername()
-              + ", assetID="
-              + assetId);
-      throw new WebApplicationException(FORBIDDEN);
-    }
+    throwIfNotRealmActiveAndAccessible(storageAsset.getRealm());
 
     if (isRestrictedUser() && !assetStorageService.isUserAsset(getUserId(), assetId)) {
       LOG.fine(
@@ -518,10 +509,13 @@ public class AssetResourceImpl extends ManagerWebResource implements AssetResour
       throw new WebApplicationException(FORBIDDEN);
     }
 
-    Asset<?> draft = request != null ? request.getDraft() : null;
+    if (request == null || request.getDraft() == null) {
+      throw new WebApplicationException("An asset draft is required", BAD_REQUEST);
+    }
 
-    if (draft == null
-        || !Objects.equals(assetId, draft.getId())
+    Asset<?> draft = request.getDraft();
+
+    if (!Objects.equals(assetId, draft.getId())
         || !Objects.equals(storageAsset.getRealm(), draft.getRealm())
         || !Objects.equals(storageAsset.getType(), draft.getType())) {
       throw importFailure(

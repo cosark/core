@@ -1351,7 +1351,7 @@
     "skippedTypeMismatch": "Skipped, the attribute has a different type",
     "next": "Next",
     "warningHeading": "Warning",
-    "overwriteConfirm": "You are about to overwrite existing attribute values, are you sure?",
+    "overwriteConfirm": "You are about to overwrite existing attribute configuration, are you sure?",
     "confirm": "Confirm",
     "imported": "The configuration of these attributes was imported: {{attributes}}",
     "saveToPersist": "Save the asset to keep these changes, or discard them as usual.",
@@ -1359,6 +1359,7 @@
     "genericParametersDescription": "Selected values are left out of the file and asked for once when it is imported.",
     "genericParameterValuesDescription": "This configuration needs a value for the following parameters. Each value is applied to every attribute listed with it.",
     "invalidGenericParameterValue": "This value does not fit the configuration it is applied to.",
+    "forbidden": "You are not allowed to import attribute configuration into this asset.",
     "failure": {
       "INVALID_JSON": "The selected file does not hold valid JSON.",
       "UNSUPPORTED_VERSION": "The selected file holds an unsupported attribute configuration version.",

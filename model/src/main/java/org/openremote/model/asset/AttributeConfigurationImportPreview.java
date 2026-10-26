@@ -27,8 +27,9 @@ import java.util.Map;
 
 /**
  * What importing an {@link AttributeConfigurationDocument} into an asset draft would do, for the
- * user to confirm or cancel. A {@link #failure} means nothing can be imported and the remaining
- * fields are empty.
+ * user to confirm or cancel. With a {@link #failure} nothing can be imported and there are no
+ * patched attributes, but the other fields still hold what could be worked out, such as the skipped
+ * attributes or the generic parameters that need a value.
  */
 @Schema(
     description =

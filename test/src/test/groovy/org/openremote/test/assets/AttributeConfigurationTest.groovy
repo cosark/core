@@ -37,6 +37,8 @@ import org.openremote.test.ManagerContainerTrait
 import spock.lang.Specification
 
 import static jakarta.ws.rs.core.Response.Status.BAD_REQUEST
+import static jakarta.ws.rs.core.Response.Status.CONFLICT
+import static jakarta.ws.rs.core.Response.Status.FORBIDDEN
 import static org.openremote.manager.security.ManagerIdentityProvider.OR_ADMIN_PASSWORD
 import static org.openremote.manager.security.ManagerIdentityProvider.OR_ADMIN_PASSWORD_DEFAULT
 import static org.openremote.model.Constants.*
@@ -130,8 +132,11 @@ class AttributeConfigurationTest extends Specification implements ManagerContain
 
     then: "the import is rejected with the reason"
     WebApplicationException ex = thrown()
-    ex.response.status == BAD_REQUEST.statusCode
-    ex.response.readEntity(AttributeConfigurationImportPreview.class).failure == UNSUPPORTED_VERSION
+    ex.response.withCloseable { r ->
+      assert r.status == BAD_REQUEST.statusCode
+      assert r.readEntity(AttributeConfigurationImportPreview.class).failure == UNSUPPORTED_VERSION
+      return true
+    }
 
     when: "a document holding no attribute of the target asset is imported"
     assetResource.previewAttributeConfigurationImport(null, target.id,
@@ -139,10 +144,36 @@ class AttributeConfigurationTest extends Specification implements ManagerContain
 
     then: "the import is rejected and the skipped attribute is reported"
     WebApplicationException noneImportable = thrown()
-    noneImportable.response.status == BAD_REQUEST.statusCode
-    def rejected = noneImportable.response.readEntity(AttributeConfigurationImportPreview.class)
-    rejected.failure == NO_IMPORTABLE_ATTRIBUTES
-    rejected.missingAttributes*.name == ["absent"]
+    noneImportable.response.withCloseable { r ->
+      assert r.status == BAD_REQUEST.statusCode
+      def rejected = r.readEntity(AttributeConfigurationImportPreview.class)
+      assert rejected.failure == NO_IMPORTABLE_ATTRIBUTES
+      assert rejected.missingAttributes*.name == ["absent"]
+      return true
+    }
+
+    when: "the draft of another asset is submitted"
+    assetResource.previewAttributeConfigurationImport(null, target.id,
+            new AttributeConfigurationImportRequest(source, ValueUtil.asJSON(document).orElseThrow()))
+
+    then: "the import conflicts with the target asset"
+    WebApplicationException draftMismatch = thrown()
+    draftMismatch.response.withCloseable { r ->
+      assert r.status == CONFLICT.statusCode
+      assert r.readEntity(AttributeConfigurationImportPreview.class).failure == DRAFT_MISMATCH
+      return true
+    }
+
+    when: "no draft is submitted"
+    assetResource.previewAttributeConfigurationImport(null, target.id,
+            new AttributeConfigurationImportRequest(null, ValueUtil.asJSON(document).orElseThrow()))
+
+    then: "the request is rejected as invalid rather than as a conflict"
+    WebApplicationException noDraft = thrown()
+    noDraft.response.withCloseable { r ->
+      assert r.status == BAD_REQUEST.statusCode
+      return true
+    }
 
     when: "the read only flag of the source asset is exported as a generic parameter"
     def generic = assetResource.exportAttributeConfiguration(null, source.id, [], ["meta.readOnly"])
@@ -218,6 +249,10 @@ class AttributeConfigurationTest extends Specification implements ManagerContain
                     ValueUtil.asJSON(document).orElseThrow()))
 
     then: "access is forbidden"
-    thrown(ForbiddenException)
+    ForbiddenException forbidden = thrown()
+    forbidden.response.withCloseable { r ->
+      assert r.status == FORBIDDEN.statusCode
+      return true
+    }
   }
 }

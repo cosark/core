@@ -389,9 +389,10 @@ public interface AssetResource {
    * Validate an attribute configuration document against an asset draft and report what importing
    * it would do, without storing anything. The returned patched attributes are for the client to
    * apply to the draft once the user confirms, so the same access as {@link #update} is required. A
-   * 400 status is returned if the document cannot be imported, including while its generic
-   * parameters lack a valid value, and a 409 status if the draft no longer identifies the persisted
-   * asset.
+   * 400 status is returned if no draft is given or the document cannot be imported, including while
+   * its generic parameters lack a valid value, and a 409 status if the draft no longer identifies
+   * the persisted asset. A rejected document is answered with the preview, whose failure names the
+   * reason.
    */
   @POST
   @Path("{assetId}/attributeConfiguration/import")
@@ -405,9 +406,25 @@ public interface AssetResource {
           "Validates the document, matches its attributes against the draft by name and type, and returns the compatibility report together with the draft attributes holding the imported metadata. When the document has generic parameters, the report lists those needing a value and is rejected until valid values are submitted. Nothing is stored; the client applies the patch after the user confirms.")
   @OpenApiResponses.Ok
   @OpenApiResponses.Authenticated
-  @OpenApiResponses.BadRequest
+  @ApiResponse(
+      responseCode = "400",
+      description =
+          "The draft is missing, or the document cannot be imported; a rejected document is answered with the preview, whose failure names the reason",
+      content = {
+        @Content(
+            mediaType = APPLICATION_JSON,
+            schema = @Schema(implementation = AttributeConfigurationImportPreview.class)),
+        @Content(mediaType = "text/plain", schema = @Schema(implementation = String.class))
+      })
   @OpenApiResponses.NotFound
-  @OpenApiResponses.Conflict
+  @ApiResponse(
+      responseCode = "409",
+      description =
+          "The draft no longer identifies the persisted asset; the preview failure is DRAFT_MISMATCH",
+      content =
+          @Content(
+              mediaType = APPLICATION_JSON,
+              schema = @Schema(implementation = AttributeConfigurationImportPreview.class)))
   AttributeConfigurationImportPreview previewAttributeConfigurationImport(
       @BeanParam RequestParams requestParams,
       @Parameter(description = ASSET_ID, example = EXAMPLE_ASSET_ID) @PathParam("assetId")

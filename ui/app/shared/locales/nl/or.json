@@ -1337,7 +1337,7 @@
     "skippedTypeMismatch": "Overgeslagen, het attribuut heeft een ander type",
     "next": "Volgende",
     "warningHeading": "Waarschuwing",
-    "overwriteConfirm": "Je staat op het punt bestaande attribuutwaarden te overschrijven, weet je het zeker?",
+    "overwriteConfirm": "Je staat op het punt bestaande attribuutconfiguratie te overschrijven, weet je het zeker?",
     "confirm": "Bevestigen",
     "imported": "De configuratie van deze attributen is geïmporteerd: {{attributes}}",
     "saveToPersist": "Sla het asset op om deze wijzigingen te behouden, of maak ze zoals gebruikelijk ongedaan.",
@@ -1345,6 +1345,7 @@
     "genericParametersDescription": "Geselecteerde waarden worden uit het bestand weggelaten en bij het importeren eenmalig gevraagd.",
     "genericParameterValuesDescription": "Deze configuratie heeft een waarde nodig voor de volgende parameters. Elke waarde wordt toegepast op alle attributen die erbij vermeld staan.",
     "invalidGenericParameterValue": "Deze waarde past niet bij de configuratie waarop ze wordt toegepast.",
+    "forbidden": "Je hebt geen rechten om attribuutconfiguratie in dit asset te importeren.",
     "failure": {
       "INVALID_JSON": "Het geselecteerde bestand bevat geen geldige JSON.",
       "UNSUPPORTED_VERSION": "Het geselecteerde bestand bevat een niet-ondersteunde versie van de attribuutconfiguratie.",
