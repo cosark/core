@@ -34,19 +34,18 @@ import {
   type PushNotificationMessage,
   type EmailNotificationMessage,
   type LocalizedNotificationMessage,
+  getNotificationLanguages,
+  getRealmNotificationConfig,
 } from "@openremote/model";
 import { getTargetTypeMap, OrRulesJsonRuleChangedEvent } from "./or-rule-json-viewer";
-import "./modals/or-rule-notification-modal";
+import "./or-rule-json-dialog";
 import "./forms/or-rule-form-email-message";
 import "./forms/or-rule-form-push-notification";
 import "./forms/or-rule-form-localized";
 import "./or-rule-action-attribute";
 import { i18next } from "@openremote/or-translate";
 import manager, { Util } from "@openremote/core";
-import type {
-  OrRulesNotificationModalCancelEvent,
-  OrRulesNotificationModalOkEvent,
-} from "./modals/or-rule-notification-modal";
+import type { OrRulesActionDialogCancelEvent, OrRulesActionDialogOkEvent } from "./or-rule-json-dialog";
 import type { OrVaadinComboBox } from "@openremote/or-vaadin-components/or-vaadin-combo-box";
 
 // language=CSS
@@ -119,8 +118,7 @@ export class OrRuleActionNotification extends OrElement {
       const message = this.action.notification.message;
       if (message?.type === "localized") {
         const locale =
-          this.config?.notifications?.[manager.displayRealm]?.defaultLanguage ||
-          this.config?.notifications?.default?.defaultLanguage ||
+          getRealmNotificationConfig(this.config?.notifications, manager.displayRealm)?.defaultLanguage ||
           manager.config.defaultLanguage!;
         const msg = message.languages?.[locale]; // if localized, we use the default language
         if (msg?.type === "push") {
@@ -421,7 +419,7 @@ export class OrRuleActionNotification extends OrElement {
     }
 
     // When 'cancel' is pressed, reset ACTION to the initial state (all changes get removed)
-    const onModalCancel = (ev: OrRulesNotificationModalCancelEvent) => {
+    const onModalCancel = (_ev: OrRulesActionDialogCancelEvent) => {
       if (this._initialAction && this.action.notification) {
         const newAction = structuredClone(this._initialAction);
 
@@ -438,7 +436,7 @@ export class OrRuleActionNotification extends OrElement {
       }
     };
 
-    const onModalOk = (ev: OrRulesNotificationModalOkEvent) => {
+    const onModalOk = (_ev: OrRulesActionDialogOkEvent) => {
       this._initialAction = structuredClone(this.action); // update initial action for opening the modal in the future
       this.dispatchEvent(new OrRulesJsonRuleChangedEvent());
     };
@@ -446,39 +444,29 @@ export class OrRuleActionNotification extends OrElement {
     if (message) {
       if (messageType === "push") {
         modalTemplate = html`
-          <or-rule-notification-modal
-            title="push-notification"
-            .action="${this.action}"
-            ?readonly=${this.readonly}
-            @or-rules-notification-modal-cancel="${onModalCancel}"
-            @or-rules-notification-modal-ok="${onModalOk}"
-          >
+          <or-rule-json-dialog ?readonly=${this.readonly} @cancel="${onModalCancel}" @ok="${onModalOk}">
+            <or-translate slot="button" value="message"></or-translate>
+            <or-translate slot="title" value="push-notification"></or-translate>
             <or-rule-form-push-notification
               .message="${message as PushNotificationMessage}"
+              ?readonly=${this.readonly}
             ></or-rule-form-push-notification>
-          </or-rule-notification-modal>
+          </or-rule-json-dialog>
         `;
       } else if (messageType === "email") {
         modalTemplate = html`
-          <or-rule-notification-modal
-            title="email"
-            .action="${this.action}"
-            ?readonly=${this.readonly}
-            @or-rules-notification-modal-cancel="${onModalCancel}"
-            @or-rules-notification-modal-ok="${onModalOk}"
-          >
-            <or-rule-form-email-message .message="${message as EmailNotificationMessage}"></or-rule-form-email-message>
-          </or-rule-notification-modal>
+          <or-rule-json-dialog ?readonly=${this.readonly} @cancel="${onModalCancel}" @ok="${onModalOk}">
+            <or-translate slot="button" value="message"></or-translate>
+            <or-translate slot="title" value="email"></or-translate>
+            <or-rule-form-email-message
+              .message="${message as EmailNotificationMessage}"
+              ?readonly=${this.readonly}
+            ></or-rule-form-email-message>
+          </or-rule-json-dialog>
         `;
       } else if (messageType === "localized") {
-        const notificationConfig =
-          this.config?.notifications?.[manager.displayRealm] || this.config?.notifications?.default;
-        const languages = [
-          ...new Set([
-            ...(notificationConfig?.languages || []),
-            ...(Object.keys((message as LocalizedNotificationMessage).languages || {}) || []),
-          ]),
-        ] as string[];
+        const notificationConfig = getRealmNotificationConfig(this.config?.notifications, manager.displayRealm);
+        const languages = getNotificationLanguages(notificationConfig, message);
         const defaultLang = notificationConfig?.defaultLanguage || manager.config.defaultLanguage;
         if (languages.length === 0 && defaultLang) {
           languages.push(defaultLang);
@@ -487,21 +475,18 @@ export class OrRuleActionNotification extends OrElement {
         const type = this.actionType === ActionType.EMAIL_LOCALIZED ? "email" : "push";
         const title = this.actionType === ActionType.EMAIL_LOCALIZED ? "email" : "push-notification";
         modalTemplate = html`
-          <or-rule-notification-modal
-            title="${title}"
-            .action="${this.action}"
-            ?readonly=${this.readonly}
-            @or-rules-notification-modal-cancel="${onModalCancel}"
-            @or-rules-notification-modal-ok="${onModalOk}"
-          >
+          <or-rule-json-dialog ?readonly=${this.readonly} @cancel="${onModalCancel}" @ok="${onModalOk}">
+            <or-translate slot="button" value="message"></or-translate>
+            <or-translate slot="title" value=${title}></or-translate>
             <or-rule-form-localized
               .message="${message}"
               .type="${type}"
               .languages="${languages}"
               .defaultLang="${defaultLang}"
               .wrongLanguage="${defaultLangHasChanged}"
+              ?readonly=${this.readonly}
             ></or-rule-form-localized>
-          </or-rule-notification-modal>
+          </or-rule-json-dialog>
         `;
       }
     }

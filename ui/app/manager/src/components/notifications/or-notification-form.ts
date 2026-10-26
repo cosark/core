@@ -20,11 +20,15 @@ import { css, html } from "lit";
 import { OrElement } from "@openremote/or-element";
 import { customElement, property, state } from "lit/decorators.js";
 import { when } from "lit/directives/when.js";
+import { classMap } from "lit/directives/class-map.js";
 import { i18next } from "@openremote/or-translate";
-import manager, { Util } from "@openremote/core";
+import manager, { DEFAULT_LANGUAGES, Util } from "@openremote/core";
 import {
   type Asset,
+  ClientRole,
   type EmailNotificationMessage,
+  type LocalizedNotificationMessage,
+  type ManagerAppRealmNotificationConfig,
   type Notification,
   NotificationTargetType,
   type PushNotificationButton,
@@ -32,6 +36,8 @@ import {
   PushNotificationMessageMessagePriority,
   type SentNotification,
   type User,
+  getNotificationLanguages,
+  resolveNotificationMessage,
 } from "@openremote/model";
 import { showSnackbar } from "@openremote/or-mwc-components/or-mwc-snackbar";
 import type { OrAssetTree, OrAssetTreeSelectionEvent } from "@openremote/or-asset-tree";
@@ -43,7 +49,7 @@ import "@openremote/or-vaadin-components/or-vaadin-text-field";
 import "@openremote/or-vaadin-components/or-vaadin-text-area";
 import "@openremote/or-vaadin-components/or-vaadin-toggle";
 
-export type NotificationMessage = PushNotificationMessage | EmailNotificationMessage;
+type NotificationMessage = PushNotificationMessage | EmailNotificationMessage;
 
 // Requires a scheme (e.g. https://) before the rest of the URL; shared by the actionUrl field's pattern attribute
 // and the create-validation check. The hyphen is escaped so it's valid under the pattern attribute's `v` flag.
@@ -69,11 +75,15 @@ export class OrNotificationFormChangedEvent extends CustomEvent<void> {
 export class OrNotificationForm extends OrElement {
   static styles = css`
     :host {
-      display: block;
+      display: flex;
+      flex-direction: column;
+      min-height: 100%;
     }
 
     .form-container {
-      height: 100%;
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
     }
 
     or-vaadin-select,
@@ -85,10 +95,6 @@ export class OrNotificationForm extends OrElement {
       margin-bottom: 16px;
     }
 
-    or-asset-tree {
-      flex: 0 0 auto;
-    }
-
     /* Grid styles */
 
     .formGridContainer {
@@ -98,8 +104,10 @@ export class OrNotificationForm extends OrElement {
       grid-template-areas:
         "targetContainer messageContentContainer"
         "targetContainer actionButtonContainer";
+      /* The action row takes the height it needs and the content area the rest */
+      grid-template-rows: 1fr auto;
       gap: var(--lumo-space-m);
-      height: 100%;
+      flex: 1 1 auto;
     }
 
     .formGridContainer-readonly {
@@ -109,8 +117,16 @@ export class OrNotificationForm extends OrElement {
       grid-template-areas:
         "targetContainer messageContentContainer"
         "propContainer actionButtonContainer";
+      grid-template-rows: 1fr auto;
       gap: var(--lumo-space-m);
-      height: 100%;
+      flex: 1 1 auto;
+    }
+
+    /* Only push notifications have actions. Dropping that row as well as its item keeps the content
+       area from ending a row gap short of the bottom */
+    .formGridContainer.noActions {
+      grid-template-areas: "targetContainer messageContentContainer";
+      grid-template-rows: 1fr;
     }
 
     [class*="formGridContainer"] > * {
@@ -125,11 +141,15 @@ export class OrNotificationForm extends OrElement {
       position: absolute;
       width: 100%;
       height: 100%;
+      display: flex;
+      flex-direction: column;
     }
 
     .messageContentContainer {
       grid-area: messageContentContainer;
       height: 100%;
+      display: flex;
+      flex-direction: column;
     }
 
     .actionButtonContainer {
@@ -142,6 +162,7 @@ export class OrNotificationForm extends OrElement {
 
     .target-area {
       flex: 1 1 auto;
+      min-height: 0;
       overflow: auto;
     }
 
@@ -150,14 +171,13 @@ export class OrNotificationForm extends OrElement {
     }
 
     @media (max-width: 1024px) {
-      :host {
-        height: auto;
-      }
-
+      /* The noActions selectors are listed so this still wins over the two-column layout above */
       .formGridContainer,
-      .formGridContainer-readonly {
+      .formGridContainer.noActions,
+      .formGridContainer-readonly,
+      .formGridContainer-readonly.noActions {
         grid-template-columns: 1fr;
-        height: auto;
+        grid-template-rows: none;
       }
 
       .formGridContainer {
@@ -167,12 +187,25 @@ export class OrNotificationForm extends OrElement {
           "actionButtonContainer";
       }
 
+      .formGridContainer.noActions {
+        grid-template-areas:
+          "targetContainer"
+          "messageContentContainer";
+      }
+
       .formGridContainer-readonly {
         grid-template-areas:
           "targetContainer"
           "messageContentContainer"
           "propContainer"
           "actionButtonContainer";
+      }
+
+      .formGridContainer-readonly.noActions {
+        grid-template-areas:
+          "targetContainer"
+          "messageContentContainer"
+          "propContainer";
       }
 
       /* Return the target column to normal flow so its stacked row keeps a height */
@@ -185,6 +218,13 @@ export class OrNotificationForm extends OrElement {
 
   @state()
   protected _message: NotificationMessage = { type: "push" };
+
+  // The language of the message being displayed; only set for a localized notification, which holds one per language
+  @state()
+  protected _messageLanguage?: string;
+
+  // The messages of a localized notification, to switch the displayed language between
+  protected _messageLanguages?: LocalizedNotificationMessage["languages"];
 
   @state()
   protected _targetType: NotificationTargetType = this._defaultTargetType();
@@ -220,6 +260,10 @@ export class OrNotificationForm extends OrElement {
   @property({ type: String })
   public realm?: string;
 
+  // The realm's notification config, which decides the languages a localized notification can be shown for
+  @property({ type: Object })
+  public notificationConfig?: ManagerAppRealmNotificationConfig;
+
   async firstUpdated() {
     // In readonly (details) mode the form only displays an existing notification's stored values; the
     // asset/user/realm option lists are only used by the editable target selectors, so skip loading them.
@@ -227,16 +271,16 @@ export class OrNotificationForm extends OrElement {
       return;
     }
 
-    const canReadAssets = manager.hasRole("read:assets") || manager.hasRole("read:admin");
+    const canReadAssets = manager.hasRole(ClientRole.READ_ASSETS) || manager.hasRole(ClientRole.READ_ADMIN);
 
     const promises = [];
     if (canReadAssets) {
       promises.push(this._loadAssets());
     }
-    if (manager.hasRole("read:users") || manager.hasRole("read:admin")) {
+    if (manager.hasRole(ClientRole.READ_USERS) || manager.hasRole(ClientRole.READ_ADMIN)) {
       promises.push(this._loadUsers());
     }
-    if (manager.hasRole("read:admin")) {
+    if (manager.hasRole(ClientRole.READ_ADMIN)) {
       promises.push(this._loadRealms());
     }
     await Promise.all(promises);
@@ -274,7 +318,7 @@ export class OrNotificationForm extends OrElement {
   /** Users are the default recipient type; falls back to assets for callers not allowed to pick users. */
   protected _defaultTargetType(): NotificationTargetType {
     const canSelectUsers =
-      !manager.isRestrictedUser() && (manager.hasRole("read:users") || manager.hasRole("read:admin"));
+      !manager.isRestrictedUser() && (manager.hasRole(ClientRole.READ_USERS) || manager.hasRole(ClientRole.READ_ADMIN));
     return canSelectUsers ? NotificationTargetType.USER : NotificationTargetType.ASSET;
   }
 
@@ -289,7 +333,7 @@ export class OrNotificationForm extends OrElement {
   }
 
   protected async _loadUsers(): Promise<User[]> {
-    if (!manager.hasRole("read:users") && !manager.hasRole("read:admin")) {
+    if (!manager.hasRole(ClientRole.READ_USERS) && !manager.hasRole(ClientRole.READ_ADMIN)) {
       return [];
     }
     try {
@@ -307,7 +351,7 @@ export class OrNotificationForm extends OrElement {
   }
 
   protected async _loadAssets(): Promise<Asset[]> {
-    if (!manager.hasRole("read:assets") && !manager.hasRole("read:admin")) {
+    if (!manager.hasRole(ClientRole.READ_ASSETS) && !manager.hasRole(ClientRole.READ_ADMIN)) {
       return [];
     }
     try {
@@ -404,7 +448,10 @@ export class OrNotificationForm extends OrElement {
   private async _populateFromNotification() {
     if (!this.notification) return;
 
-    this._message = (this.notification.message || { type: "push" }) as NotificationMessage;
+    const { message, language, languages } = resolveNotificationMessage(this.notification.message, i18next.language);
+    this._message = message || { type: "push" };
+    this._messageLanguage = language;
+    this._messageLanguages = languages;
     this._targetType = this.notification.target || NotificationTargetType.ASSET;
     this._targets = this.notification.targetId ? [this.notification.targetId] : [];
 
@@ -460,12 +507,18 @@ export class OrNotificationForm extends OrElement {
 
   protected render() {
     const inputDisabled = this.disabled || this.readonly;
+    const hasActions = this._message.type === "push";
+    const gridClasses = {
+      formGridContainer: !this.readonly,
+      "formGridContainer-readonly": this.readonly,
+      noActions: !hasActions,
+    };
 
     return html`
       <div class="form-container">
-        <div class="${this.readonly ? "formGridContainer-readonly" : "formGridContainer"}">
+        <div class="${classMap(gridClasses)}">
           ${this._renderTargetContainer(inputDisabled)} ${this._renderMessageContentContainer(inputDisabled)}
-          ${this._message.type === "push" ? this._renderActionButtonContainer(inputDisabled) : ""}
+          ${hasActions ? this._renderActionButtonContainer(inputDisabled) : ""}
           ${this.readonly ? this._renderPropertiesContainer() : ""}
         </div>
       </div>
@@ -475,7 +528,7 @@ export class OrNotificationForm extends OrElement {
   protected _renderPropertiesContainer() {
     if (!this.notification) return "";
 
-    const canReadUsers = manager.hasRole("read:users") || manager.hasRole("read:admin");
+    const canReadUsers = manager.hasRole(ClientRole.READ_USERS) || manager.hasRole(ClientRole.READ_ADMIN);
     const source =
       canReadUsers && this.notification.sourceId
         ? `${this._normalizeValue(this.notification.source)}, ${this.notification.sourceId}`
@@ -501,9 +554,9 @@ export class OrNotificationForm extends OrElement {
   protected _renderTargetContainer(inputDisabled: boolean) {
     if (inputDisabled) {
       const canSeeTargetId =
-        manager.hasRole("read:admin") ||
-        (this._targetType === NotificationTargetType.USER && manager.hasRole("read:users")) ||
-        (this._targetType === NotificationTargetType.ASSET && manager.hasRole("read:assets"));
+        manager.hasRole(ClientRole.READ_ADMIN) ||
+        (this._targetType === NotificationTargetType.USER && manager.hasRole(ClientRole.READ_USERS)) ||
+        (this._targetType === NotificationTargetType.ASSET && manager.hasRole(ClientRole.READ_ASSETS));
       const targetDisplay = canSeeTargetId ? this._normalizeValue(this._targets[0]) : "-";
       return html`
         <div class="targetContainer">
@@ -515,13 +568,16 @@ export class OrNotificationForm extends OrElement {
     }
 
     const allowedTargetTypes: SelectItem[] = [];
-    if (manager.hasRole("read:assets") || manager.hasRole("read:admin")) {
+    if (manager.hasRole(ClientRole.READ_ASSETS) || manager.hasRole(ClientRole.READ_ADMIN)) {
       allowedTargetTypes.push({
         label: i18next.t("notifications.targetTypes.ASSET"),
         value: NotificationTargetType.ASSET,
       });
     }
-    if (!manager.isRestrictedUser() && (manager.hasRole("read:users") || manager.hasRole("read:admin"))) {
+    if (
+      !manager.isRestrictedUser() &&
+      (manager.hasRole(ClientRole.READ_USERS) || manager.hasRole(ClientRole.READ_ADMIN))
+    ) {
       allowedTargetTypes.unshift({
         label: i18next.t("notifications.targetTypes.USER"),
         value: NotificationTargetType.USER,
@@ -616,6 +672,7 @@ export class OrNotificationForm extends OrElement {
         >
           <or-translate slot="label" value="type"></or-translate>
         </or-vaadin-select>
+        ${when(this._messageLanguage, () => this._renderMessageLanguageSelect())}
         ${
           this._message.type === "push"
             ? this._renderPushContent(this._message as PushNotificationMessage, inputDisabled)
@@ -623,6 +680,40 @@ export class OrNotificationForm extends OrElement {
         }
       </div>
     `;
+  }
+
+  /**
+   * Picks which language of a localized notification is shown. Stays enabled while the rest of the form is
+   * readonly, as it selects between stored messages instead of editing one; a language that is supported but
+   * not translated shows empty content.
+   */
+  protected _renderMessageLanguageSelect() {
+    const items: SelectItem[] = getNotificationLanguages(this.notificationConfig, this.notification?.message).map(
+      (language) => ({
+        label: i18next.t(DEFAULT_LANGUAGES[language] || language),
+        value: language,
+      })
+    );
+
+    return html`
+      <or-vaadin-select
+        id="messageLanguage"
+        .items="${items}"
+        value="${this._messageLanguage}"
+        @change="${(ev: Event) => this._onMessageLanguageChanged((ev.currentTarget as OrVaadinSelect).value)}"
+      >
+        <or-translate slot="label" value="language"></or-translate>
+      </or-vaadin-select>
+    `;
+  }
+
+  protected _onMessageLanguageChanged(language: string) {
+    if (language === this._messageLanguage) {
+      return;
+    }
+    this._messageLanguage = language;
+    // A supported language the notification was never translated into holds no message of its own
+    this._message = (this._messageLanguages?.[language] as NotificationMessage) || { type: this._message.type };
   }
 
   protected _renderPushContent(message: PushNotificationMessage, inputDisabled: boolean) {

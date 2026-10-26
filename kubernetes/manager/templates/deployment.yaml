@@ -1,8 +1,10 @@
 {{- include "manager.logging.validate" . }}
+{{- include "manager.otel.validate" . }}
 {{- $loggingInlineConfig := .Values.logging.config -}}
 {{- $loggingExistingConfigMap := .Values.logging.existingConfigMap -}}
 {{- $loggingEnabled := or $loggingInlineConfig $loggingExistingConfigMap -}}
 {{- $loggingExternalConfig := $loggingExistingConfigMap -}}
+{{- $webserver := .Values.or.webserver | default dict -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,6 +13,17 @@ metadata:
     {{- include "manager.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- with .Values.strategy }}
+  strategy:
+    {{- if eq .type "Recreate" }}
+    type: Recreate
+    # Recreate cannot have rollingUpdate settings. Existing deployments may need
+    # a merge patch before a server-side apply upgrade (see test/load2-eks/README.md).
+    rollingUpdate: null
+    {{- else }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "manager.selectorLabels" . | nindent 6 }}
@@ -47,6 +60,10 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ $webserver.listenPort | default 8080 }}
+              protocol: TCP
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
@@ -68,6 +85,30 @@ spec:
             - name: OR_SSL_PORT
               value: "{{ .Values.or.port }}"
 
+            {{- range $name, $value := dict
+              "OR_WEBSERVER_LISTEN_HOST" $webserver.listenHost
+              "OR_WEBSERVER_LISTEN_PORT" $webserver.listenPort
+              "OR_WEBSERVER_ALLOWED_ORIGINS" $webserver.allowedOrigins
+              "OR_WEBSERVER_ALLOWED_METHODS" $webserver.allowedMethods
+              "OR_WEBSERVER_ALLOWED_HEADERS" $webserver.allowedHeaders
+              "OR_WEBSERVER_EXPOSED_HEADERS" $webserver.exposedHeaders
+              "OR_WEBSERVER_DUMP_REQUESTS" $webserver.dumpRequests
+              "OR_WEBSERVER_WORKER_THREADS_MAX" $webserver.workerThreadsMax
+              "OR_WEBSERVER_IO_THREADS_MAX" $webserver.ioThreadsMax
+              "OR_WEBSERVER_MAX_ENTITY_SIZE" $webserver.maxEntitySize
+              "OR_WEBSERVER_MULTIPART_MAX_ENTITY_SIZE" $webserver.multipartMaxEntitySize
+            }}
+            {{- if and (ne $value nil) (ne (toString $value) "") }}
+            - name: {{ $name }}
+              {{- /* YAML numbers may be floats; keep integer settings out of scientific notation. */}}
+              {{- if kindIs "float64" $value }}
+              value: {{ $value | toJson | quote }}
+              {{- else }}
+              value: {{ $value | quote }}
+              {{- end }}
+            {{- end }}
+            {{- end }}
+
             - name: OR_FIREBASE_CONFIG_FILE
               value: "{{ .Values.or.firebaseConfigFile }}"
 
@@ -87,12 +128,12 @@ spec:
               value: "{{ .Values.or.postgresql.database }}"
             - name: OR_DB_SCHEMA
               value: "{{ .Values.or.postgresql.schema }}"
-            - name: KC_DB_USERNAME
+            - name: OR_DB_USERNAME
               valueFrom:
                 secretKeyRef:
                   name: openremote-secret
                   key: postgresql-username
-            - name: KC_DB_PASSWORD
+            - name: OR_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: openremote-secret
@@ -137,6 +178,25 @@ spec:
             - name: OR_METRICS_PORT
               value: "{{ .Values.or.metricsPort }}"
 
+            {{- if .Values.or.otel.enabled }}
+            - name: OTEL_JAVAAGENT_ENABLED
+              value: "true"
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.or.otel.serviceName | quote }}
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.or.otel.endpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ .Values.or.otel.protocol | quote }}
+            - name: OTEL_METRICS_EXPORTER
+              value: "none"
+            - name: OTEL_LOGS_EXPORTER
+              value: "none"
+            - name: OTEL_INSTRUMENTATION_COMMON_DB_STATEMENT_SANITIZER_ENABLED
+              value: "true"
+            {{- end }}
+
             {{- if $loggingEnabled }}
             - name: OR_LOGGING_CONFIG_FILE
               value: "{{ include "manager.logging.configFilePath" . }}"
@@ -166,7 +226,7 @@ spec:
         {{- end }}
         - name: manager-data
           persistentVolumeClaim:
-            claimName: {{ include "manager.fullname" . }}
+            claimName: {{ include "manager.persistence.claimName" . }}
       {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
       {{- end }}

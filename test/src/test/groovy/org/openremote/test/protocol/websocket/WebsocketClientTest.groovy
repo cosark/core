@@ -101,7 +101,7 @@ class WebsocketClientTest extends Specification implements ManagerContainerTrait
     def client = new WebsocketIOClient<String>(
             new URIBuilder("ws://127.0.0.1:$serverPort/websocket/events?Realm=building").build(),
             null,
-            new OAuthPasswordGrant("http://127.0.0.1:$serverPort/auth/realms/building/protocol/openid-connect/token",
+            new OAuthPasswordGrant("http://127.0.0.1:8081/auth/realms/building/protocol/openid-connect/token",
             KEYCLOAK_CLIENT_ID,
             null,
             null,
@@ -119,7 +119,7 @@ class WebsocketClientTest extends Specification implements ManagerContainerTrait
     def client2 = new WebsocketIOClient<String>(
             new URIBuilder("ws://127.0.0.1:$serverPort/websocket/events?Realm=building").build(),
             null,
-            new OAuthPasswordGrant("http://127.0.0.1:$serverPort/auth/realms/building/protocol/openid-connect/token",
+            new OAuthPasswordGrant("http://127.0.0.1:8081/auth/realms/building/protocol/openid-connect/token",
             KEYCLOAK_CLIENT_ID,
             null,
             null,
@@ -310,10 +310,10 @@ class WebsocketClientTest extends Specification implements ManagerContainerTrait
                     new MetaItem<>(MetaItemType.ACCESS_RESTRICTED_READ, false),
                     new MetaItem<>(MetaItemType.ACCESS_PUBLIC_READ, false)
                     )
-            )
+    )
     apartment1Livingroom.getAttribute(Asset.NOTES).get().addOrReplaceMeta(
             new MetaItem<>(MetaItemType.ACCESS_PUBLIC_READ)
-            )
+    )
     apartment1Livingroom = assetStorageService.merge(apartment1Livingroom)
 
     then: "the testuser3 client should be notified with only accessible attributes"
@@ -450,7 +450,7 @@ class WebsocketClientTest extends Specification implements ManagerContainerTrait
     def client = new WebsocketIOClient<String>(
             new URIBuilder("ws://127.0.0.1:$serverPort/websocket/events?Realm=master").build(),
             null,
-            new OAuthPasswordGrant("http://127.0.0.1:$serverPort/auth/realms/master/protocol/openid-connect/token",
+            new OAuthPasswordGrant("http://127.0.0.1:8081/auth/realms/master/protocol/openid-connect/token",
             KEYCLOAK_CLIENT_ID,
             null,
             null,
@@ -465,7 +465,7 @@ class WebsocketClientTest extends Specification implements ManagerContainerTrait
     List<String> receivedMessages = new CopyOnWriteArrayList<>()
     client.addMessageConsumer(
             message -> receivedMessages.add(messageFromString(message))
-            )
+    )
     client.addConnectionStatusConsumer({ status ->
       connectionStatus = status
     })

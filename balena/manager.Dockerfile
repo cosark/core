@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi10/openjdk-21-runtime:1.24-11
+FROM registry.access.redhat.com/ubi10/openjdk-21-runtime:1.24-17
 
 # Add git commit label must be specified at build time using --build-arg GIT_COMMIT=dadadadadad
 ARG GIT_COMMIT=unknown
@@ -12,7 +12,7 @@ ENV TZ ${TZ:-Europe/Amsterdam}
 ENV OR_ADMIN_PASSWORD ${OR_ADMIN_PASSWORD:-secret}
 ENV OR_SETUP_TYPE ${OR_SETUP_TYPE}
 ENV OR_SSL_PORT ${OR_SSL_PORT:--1}
-ENV OR_HOSTNAME ${OR_HOSTNAME:-localhost}
+ENV OR_HOSTNAME ${OR_HOSTNAME:-127.0.0.1}
 ENV OR_EMAIL_HOST ${OR_EMAIL_HOST}
 ENV OR_EMAIL_USER ${OR_EMAIL_USER}
 ENV OR_EMAIL_PASSWORD ${OR_EMAIL_PASSWORD}
@@ -83,10 +83,13 @@ ADD ./manager-build/map /opt/map
 EXPOSE 8080
 EXPOSE 1883
 
-HEALTHCHECK --interval=5s --timeout=60s --start-period=5s --retries=120 CMD curl --fail --silent http://localhost:8080 || exit 1
+HEALTHCHECK --interval=5s --timeout=60s --start-period=5s --retries=120 CMD curl --fail --silent http://127.0.0.1:8080 || exit 1
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 COPY heapdump-rename.sh /heapdump-rename.sh
 RUN chmod +x /heapdump-rename.sh
 ENTRYPOINT ["/entrypoint.sh"]
+
+# Update CA certificates to address CVE-2026-114406 until the base image includes the fix
+RUN microdnf upgrade -y ca-certificates && microdnf clean all

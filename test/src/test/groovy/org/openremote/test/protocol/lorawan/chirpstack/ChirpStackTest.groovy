@@ -82,7 +82,7 @@ class ChirpStackTest extends Specification implements ManagerContainerTrait {
   static final String VENDOR_ID = "dragino"
   static final String MODEL_ID = "lht65"
   static final String FIRMWARE_VERSION = "1.8"
-  static final String HOST = "localhost"
+  static final String HOST = "127.0.0.1"
   static final Integer UPLINK_PORT = 2
   static final Integer DOWNLINK_PORT = 4
   static final Double TEMPERATURE_VALUE = 20.4
@@ -179,7 +179,7 @@ class ChirpStackTest extends Specification implements ManagerContainerTrait {
             KEYCLOAK_CLIENT_ID,
             MASTER_REALM_ADMIN_USER,
             getString(container.getConfig(), OR_ADMIN_PASSWORD, OR_ADMIN_PASSWORD_DEFAULT)
-            )
+    )
 
     and: "the agent resource"
     def agentResource = getClientApiTarget(serverUri(serverPort), MASTER_REALM, accessToken).proxy(AgentResource.class)
@@ -308,7 +308,7 @@ class ChirpStackTest extends Specification implements ManagerContainerTrait {
             KEYCLOAK_CLIENT_ID,
             MASTER_REALM_ADMIN_USER,
             getString(container.getConfig(), OR_ADMIN_PASSWORD, OR_ADMIN_PASSWORD_DEFAULT)
-            )
+    )
 
     and: "the agent resource"
     def agentResource = getClientApiTarget(serverUri(serverPort), MASTER_REALM, accessToken).proxy(AgentResource.class)
@@ -464,7 +464,7 @@ class ChirpStackTest extends Specification implements ManagerContainerTrait {
                   Status.NOT_FOUND
                   .withDescription("Device profile not found: ${request.id}")
                   .asRuntimeException()
-                  )
+          )
           return
         }
 

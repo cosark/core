@@ -2,7 +2,7 @@ name: Staging
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
 
@@ -38,6 +38,7 @@ jobs:
 
       - name: Detect changes
         id: changed-files
+        if: github.ref_type != 'tag'
         uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
         with:
           files_yaml: |
@@ -77,18 +78,18 @@ jobs:
 
       - name: Get version details
         id: get-version-details
-        uses: openremote/openremote/.github/actions/get-version-details@46767a2b23c43e83057c8995d546a876fc185126
+        uses: openremote/core/.github/actions/get-version-details@accaf8ed2cab816cb081ae57be6bebed93c049f0
 
-      - name: Check if main repo
-        id: is_main_repo
-        uses: openremote/openremote/.github/actions/check-if-main-repo@5beec5454f28eda1dd25331c9ce1d5b430266f7e
+      - name: Check if core repo
+        id: is_core_repo
+        uses: openremote/core/.github/actions/check-if-core-repo@357f1387fbc99e7a59752a62064f0bdade57612d
 
       - name: Process ci_cd.json file
         id: ci-cd-output
-        uses: openremote/openremote/.github/actions/process-cicd-json@9ea22e19db6711afd711f39517fe25509b018803
+        uses: openremote/core/.github/actions/process-cicd-json@357f1387fbc99e7a59752a62064f0bdade57612d
         with:
-          IS_MAIN_REPO: ${{ steps.is_main_repo.outputs.value }} # Shouldn't be needed in this context
-          MANAGER_VERSION: ${{ steps.is_main_repo.outputs.version }}
+          IS_CORE_REPO: ${{ steps.is_core_repo.outputs.value }} # Shouldn't be needed in this context
+          MANAGER_VERSION: ${{ steps.is_core_repo.outputs.version }}
           IS_RELEASE: ${{ steps.get-version-details.outputs.is_release }}
           VERSION: ${{ steps.get-version-details.outputs.version }}
 

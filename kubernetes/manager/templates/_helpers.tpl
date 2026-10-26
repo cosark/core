@@ -62,6 +62,13 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
+Return the PVC used for manager data.
+*/}}
+{{- define "manager.persistence.claimName" -}}
+{{- default (include "manager.fullname" .) .Values.persistence.existingClaim -}}
+{{- end }}
+
+{{/*
 Create the name of the mqtt service to use
 */}}
 {{- define "manager.mqttServiceName" -}}
@@ -104,6 +111,38 @@ Validate logging values.
   {{- range .Values.or.env -}}
     {{- if eq .name "OR_LOGGING_CONFIG_FILE" -}}
 {{- fail "manager chart values logging.* manage OR_LOGGING_CONFIG_FILE; remove OR_LOGGING_CONFIG_FILE from or.env" -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validate OpenTelemetry values.
+*/}}
+{{- define "manager.otel.validate" -}}
+{{- if .Values.or.otel.enabled -}}
+  {{- if not .Values.or.otel.serviceName -}}
+{{- fail "manager chart value or.otel.serviceName is required when or.otel.enabled is true" -}}
+  {{- end -}}
+  {{- if not .Values.or.otel.endpoint -}}
+{{- fail "manager chart value or.otel.endpoint is required when or.otel.enabled is true" -}}
+  {{- end -}}
+  {{- if not .Values.or.otel.protocol -}}
+{{- fail "manager chart value or.otel.protocol is required when or.otel.enabled is true" -}}
+  {{- end -}}
+  {{- $managedEnvironmentVariables := list
+    "OTEL_JAVAAGENT_ENABLED"
+    "OTEL_SERVICE_NAME"
+    "OTEL_TRACES_EXPORTER"
+    "OTEL_EXPORTER_OTLP_ENDPOINT"
+    "OTEL_EXPORTER_OTLP_PROTOCOL"
+    "OTEL_METRICS_EXPORTER"
+    "OTEL_LOGS_EXPORTER"
+    "OTEL_INSTRUMENTATION_COMMON_DB_STATEMENT_SANITIZER_ENABLED"
+  -}}
+  {{- range .Values.or.env -}}
+    {{- if has .name $managedEnvironmentVariables -}}
+{{- fail (printf "manager chart values or.otel.* manage %s; remove %s from or.env" .name .name) -}}
     {{- end -}}
   {{- end -}}
 {{- end -}}

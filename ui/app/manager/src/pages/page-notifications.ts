@@ -22,12 +22,15 @@ import { type AppStateKeyed, Page, type PageProvider } from "@openremote/or-app"
 import type { Store } from "@reduxjs/toolkit";
 import {
   type Asset,
+  ClientRole,
   type Notification,
   NotificationSource,
   NotificationTargetType,
   type SentNotification,
   SentNotificationSortField,
+  type ManagerAppRealmNotificationConfig,
   type User,
+  getRealmNotificationConfig,
 } from "@openremote/model";
 import manager, { DefaultColor3 } from "@openremote/core";
 import { i18next } from "@openremote/or-translate";
@@ -154,11 +157,11 @@ export class NotificationService {
   }
 
   hasUserReadPermissions(): boolean {
-    return manager.hasRole("read:users") || manager.hasRole("read:admin");
+    return manager.hasRole(ClientRole.READ_USERS) || manager.hasRole(ClientRole.READ_ADMIN);
   }
 
   hasAssetReadPermissions(): boolean {
-    return manager.hasRole("read:assets") || manager.hasRole("read:admin");
+    return manager.hasRole(ClientRole.READ_ASSETS) || manager.hasRole(ClientRole.READ_ADMIN);
   }
 
   public getDefaultTimeRange(): { fromDate: number; toDate: number } {
@@ -190,6 +193,7 @@ export interface PageNotificationsConfig {
   targetType?: string;
   fromTimestamp?: number;
   toTimestamp?: number;
+  notifications?: { [realm: string]: ManagerAppRealmNotificationConfig };
 }
 
 export function pageNotificationsProvider(
@@ -200,7 +204,7 @@ export function pageNotificationsProvider(
     name: "notifications",
     routes: ["notifications"],
     pageCreator: () => {
-      return new PageNotifications(store);
+      return new PageNotifications(store, config);
     },
   };
 }
@@ -339,7 +343,10 @@ export class PageNotifications extends Page<AppStateKeyed> {
 
   protected notificationService: NotificationService;
 
-  constructor(store: Store<AppStateKeyed>) {
+  constructor(
+    store: Store<AppStateKeyed>,
+    protected config?: PageNotificationsConfig
+  ) {
     super(store);
     this.notificationService = new NotificationService();
 
@@ -485,9 +492,11 @@ export class PageNotifications extends Page<AppStateKeyed> {
   }
 
   protected render() {
-    const writeNotifications = manager.hasRole("write:notifications");
+    const writeNotifications = manager.hasRole(ClientRole.WRITE_NOTIFICATIONS);
     const hasRecipientType =
-      manager.hasRole("read:admin") || manager.hasRole("read:assets") || manager.hasRole("read:users");
+      manager.hasRole(ClientRole.READ_ADMIN) ||
+      manager.hasRole(ClientRole.READ_ASSETS) ||
+      manager.hasRole(ClientRole.READ_USERS);
 
     return html`
       <div id="wrapper">
@@ -503,6 +512,7 @@ export class PageNotifications extends Page<AppStateKeyed> {
       <or-vaadin-dialog
         id="createDialog"
         width="1024px"
+        height="976px"
         no-close-on-outside-click
         no-close-on-esc
         header-title="${i18next.t("notifications.createNotification")}"
@@ -587,7 +597,13 @@ export class PageNotifications extends Page<AppStateKeyed> {
 
   protected _renderDetailsForm(notification?: SentNotification) {
     return html`
-      <or-notification-form .realm=${this.realm} .notification=${notification} readonly> </or-notification-form>
+      <or-notification-form
+        .realm="${this.realm}"
+        .notification="${notification}"
+        .notificationConfig="${getRealmNotificationConfig(this.config?.notifications, this.realm)}"
+        readonly
+      >
+      </or-notification-form>
     `;
   }
 

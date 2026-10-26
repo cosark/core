@@ -84,14 +84,32 @@ import static org.openremote.model.util.TextUtil.isNullOrEmpty
 import static org.openremote.model.value.MetaItemType.*
 import static org.openremote.model.value.ValueType.*
 
-// TODO: Add tests for each supported version of the gateway API
 class GatewayTest extends Specification implements ManagerContainerTrait {
+
+  def setupSpec() {
+    // Mock the GatewayClientService so we can use a different port for authentication on the GatewayClientConnector
+    def services = defaultServices().toList()
+    def gatewayClientServiceIndex = services.findIndexOf {it instanceof GatewayClientService}
+    def gatewayClientService = services.removeAt(gatewayClientServiceIndex) as GatewayClientService
+    def spyGatewayClientService = Spy(gatewayClientService)
+    services.add(gatewayClientServiceIndex, spyGatewayClientService) // Must go back in the correct position as already sorted by priority
+
+    spyGatewayClientService.createClientConnector(_ as GatewayConnection) >> { GatewayConnection connection ->
+      def identityProvider = container.getService(ManagerIdentityService.class).identityProvider as ManagerKeycloakIdentityProvider
+      def keycloakURL = identityProvider.getKeycloakPublicUrl()
+      // Use keycloaks public URI as it's on a different port to the manager under test
+      connection.@tokenEndpointURI = new URIBuilder(keycloakURL).setPath("auth/realms/" + connection.getRealm() + "/protocol/openid-connect/token").build().toString()
+      callRealMethod()
+    }
+
+    // Start the container with the spy service
+    startContainer(defaultConfig(), services)
+  }
 
   def "Gateway asset provisioning and local manager logic test"() {
 
-    given: "the container environment is started"
+    given: "some polling conditions and services from the container"
     def conditions = new PollingConditions(timeout: 15, delay: 0.2)
-    def container = startContainer(defaultConfig(), defaultServices())
     def assetProcessingService = container.getService(AssetProcessingService.class)
     def timerService = container.getService(TimerService.class)
     def assetStorageService = container.getService(AssetStorageService.class)
@@ -134,7 +152,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
             managerTestSetup.realmBuildingName,
             gateway.getClientId().orElse(""),
             gateway.getClientSecret().orElse("")
-            )
+    )
     def assetResource = getClientApiTarget(serverUri(serverPort), managerTestSetup.realmBuildingName, accessToken).proxy(AssetResource.class)
 
     and: "the realm assets are requested"
@@ -151,7 +169,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
     def gatewayClient = new WebsocketIOClient(
             new URIBuilder("ws://127.0.0.1:$serverPort/websocket/events?Realm=$managerTestSetup.realmBuildingName").build(),
             null,
-            new OAuthClientCredentialsGrant("http://127.0.0.1:$serverPort/auth/realms/$managerTestSetup.realmBuildingName/protocol/openid-connect/token",
+            new OAuthClientCredentialsGrant("http://127.0.0.1:8081/auth/realms/$managerTestSetup.realmBuildingName/protocol/openid-connect/token",
             gateway.getClientId().orElse(""),
             gateway.getClientSecret().orElse(""),
             null).setBasicAuthHeader(true))
@@ -174,10 +192,10 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
     and: "the gateway connects to this manager"
     gatewayClient.connect()
 
-    then: "the gateway netty client status should become CONNECTING"
+    then: "the gateway netty client status should become CONNECTED"
     conditions.eventually {
-      assert connectionStatus == ConnectionStatus.CONNECTING
-      assert gatewayClient.connectionStatus == ConnectionStatus.CONNECTING
+      assert connectionStatus == ConnectionStatus.CONNECTED
+      assert gatewayClient.connectionStatus == ConnectionStatus.CONNECTED
     }
 
     and: "the gateway asset connection status should be CONNECTING"
@@ -240,7 +258,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
                         .setPath("")),
                         new MetaItem<>(UNITS, Constants.units(UNITS_CELSIUS))
                         )
-                )
+        )
 
         assets.add(roomAsset)
       }
@@ -256,7 +274,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
               new Attribute<>(Asset.LOCATION, new GeoJSONPoint(10, 11)).addMeta(
                       new MetaItem<>(ACCESS_PUBLIC_READ)
                       )
-              )
+      )
 
       assets.add(buildingAsset)
     }
@@ -484,16 +502,9 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
 
     and: "the central manager should have responded to indicate sync is done"
     conditions.eventually {
-      def initDoneEventStr = clientReceivedMessages.find {
-        it.contains(GatewayInitDoneEvent.TYPE)
-      }
+      def initDoneEventStr = clientReceivedMessages.find {it.contains(GatewayInitDoneEvent.TYPE)}
       def gatewayInitDoneEvent = ValueUtil.JSON.readValue(initDoneEventStr.substring(SharedEvent.MESSAGE_PREFIX.length()), GatewayInitDoneEvent.class)
-    }
-
-    and: "the gateway client should now be CONNECTED"
-    conditions.eventually {
-      assert connectionStatus == ConnectionStatus.CONNECTED
-      assert gatewayClient.connectionStatus == ConnectionStatus.CONNECTED
+      assert gatewayInitDoneEvent != null
     }
 
     and: "the gateway asset connection status should be CONNECTED"
@@ -566,7 +577,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
                     .setPath("")),
                     new MetaItem<>(UNITS, Constants.units(UNITS_CELSIUS))
                     )
-            )
+    )
 
     gatewayClient.sendMessage(SharedEvent.MESSAGE_PREFIX + ValueUtil.asJSON(new AssetEvent(AssetEvent.Cause.CREATE, building1Room5Asset, null)).get())
 
@@ -591,7 +602,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
                     new MetaItem<>(UNITS, Constants.units(UNITS_PART_PER_MILLION)),
                     new MetaItem<>(AGENT_LINK, new HTTPAgentLink(agentAssetIds[0]).setPath(""))
                     )
-            )
+    )
     gatewayClient.sendMessage(SharedEvent.MESSAGE_PREFIX + ValueUtil.asJSON(new AssetEvent(AssetEvent.Cause.UPDATE, building1Room5Asset, (String[]) ["name", "attributes"].toArray(new String[0]))).get())
 
     then: "the asset should also be updated in the local manager"
@@ -647,6 +658,56 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
     then: "the asset should not have been deleted"
     assert assetStorageService.find(mapAssetId(gateway.id, assetIds[0], false)) != null
 
+    when: "a rogue client user is provisioned in another realm with the gateway ID from the building realm"
+    def rogueClientId = getGatewayClientId(gateway.getId())
+    def secret = UUID.randomUUID().toString()
+    def rogueGatewayUser =
+            identityProvider.createUpdateUser(
+            managerTestSetup.realmCityName,
+            new User()
+            .setServiceAccount(true)
+            .setSystemAccount(true)
+            .setUsername(rogueClientId)
+            .setEnabled(true),
+            secret,
+            true)
+
+    and: "the rogue client connects"
+    def rogueGatewayClient = new WebsocketIOClient(
+            new URIBuilder("ws://127.0.0.1:$serverPort/websocket/events?Realm=$managerTestSetup.realmCityName").build(),
+            null,
+            new OAuthClientCredentialsGrant("http://127.0.0.1:8081/auth/realms/$managerTestSetup.realmCityName/protocol/openid-connect/token",
+            rogueClientId,
+            secret,
+            null).setBasicAuthHeader(true))
+    rogueGatewayClient.setEncoderDecoderProvider({
+      [new AbstractNettyIOClient.MessageToMessageDecoder<String>(String.class, rogueGatewayClient)].toArray(new ChannelHandler[0])
+    })
+
+    and: "we add callback consumers to the rogue client"
+    List<ConnectionStatus> rogueConnectionStatuses = new CopyOnWriteArrayList<>()
+    List<String> rogueClientReceivedMessages = new CopyOnWriteArrayList<>()
+    rogueGatewayClient.addMessageConsumer({message ->
+      getLOG().info("Message received from central manager: $message")
+      rogueClientReceivedMessages.add(message as String)
+    })
+    rogueGatewayClient.addConnectionStatusConsumer({status ->
+      getLOG().info("Rouge gateway client connection staus changed: $status")
+      rogueConnectionStatuses.add(status)
+    })
+
+    and: "the rogue client connects"
+    rogueGatewayClient.connect()
+
+    then: "the rogue netty client status should continually connect as legitimate gateway client ALREADY_CONNECTED"
+    conditions.eventually {
+      assert rogueConnectionStatuses.count(ConnectionStatus.CONNECTING) > 5
+      assert rogueConnectionStatuses.count(ConnectionStatus.CONNECTED) > 5
+    }
+
+    then: "the rogue client is disconnected"
+    rogueGatewayClient.disconnect()
+
     when: "time advances"
     advancePseudoClock(1, TimeUnit.SECONDS, container)
 
@@ -677,7 +738,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
             new Attribute<>(Asset.LOCATION, new GeoJSONPoint(10, 11)).addMeta(
                     new MetaItem<>(ACCESS_PUBLIC_READ)
                     )
-            )
+    )
     assetStorageService.merge(failedAsset)
 
     then: "an error should occur"
@@ -703,7 +764,23 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
       assert !gatewayService.gatewayConnectorMap.get(gateway.getId().toLowerCase(Locale.ROOT)).disabled
     }
 
-    when: "the gateway asset client secret attribute is updated"
+    when: "the rogue client connects now the legitimate gateway client is disconnected"
+    rogueConnectionStatuses.clear()
+    rogueGatewayClient.connect()
+
+    then: "the gateway connector disconnect runnable should not be set"
+    assert gatewayService.gatewayConnectorMap.get(gateway.getId().toLowerCase(Locale.ROOT)).requestDisconnect == null
+
+    and: "the gateway netty client status should still continually connect as it's rogue"
+    conditions.eventually {
+      assert rogueConnectionStatuses.count(ConnectionStatus.CONNECTING) > 5
+      assert rogueConnectionStatuses.count(ConnectionStatus.CONNECTED) > 5
+    }
+
+    when: "the rogue client is disconnected"
+    rogueGatewayClient.disconnect()
+
+    and: "the gateway asset client secret attribute is updated"
     def newSecret = UUID.randomUUID().toString()
     assetProcessingService.sendAttributeEvent(new AttributeEvent(gateway.getId(), GatewayAsset.CLIENT_SECRET, newSecret))
 
@@ -720,7 +797,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
     gatewayClient = new WebsocketIOClient<String>(
             new URIBuilder("ws://127.0.0.1:$serverPort/websocket/events?Realm=$managerTestSetup.realmBuildingName").build(),
             null,
-            new OAuthClientCredentialsGrant("http://127.0.0.1:$serverPort/auth/realms/$managerTestSetup.realmBuildingName/protocol/openid-connect/token",
+            new OAuthClientCredentialsGrant("http://127.0.0.1:8081/auth/realms/$managerTestSetup.realmBuildingName/protocol/openid-connect/token",
             gateway.getClientId().orElse(""),
             gateway.getClientSecret().orElse(""),
             null).setBasicAuthHeader(true))
@@ -806,7 +883,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
                     .setPath("")),
                     new MetaItem<>(UNITS, Constants.units(UNITS_CELSIUS))
                     )
-            )
+    )
 
     gatewayClient.sendMessage(SharedEvent.MESSAGE_PREFIX + ValueUtil.asJSON(new AssetEvent(AssetEvent.Cause.CREATE, building2Room5Asset, null)).get())
 
@@ -869,7 +946,6 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
     capabilitiesReplyEvent = new GatewayCapabilitiesResponseEvent(VersionInfo.getGatewayApiVersion(), true)
     gatewayClient.sendMessage(SharedEvent.MESSAGE_PREFIX + ValueUtil.asJSON(capabilitiesReplyEvent).get())
 
-
     then: "the gateway connector sync should be completed"
     conditions.eventually {
       def gatewayConnector = gatewayService.gatewayConnectorMap.get(gateway.getId().toLowerCase(Locale.ROOT))
@@ -896,16 +972,18 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
 
     when: "the gateway asset is deleted"
     def deleted = assetStorageService.delete([gateway.id])
+    def gatewayId = gateway.id
+    gateway = null
 
     then: "all descendant assets should have been removed"
     conditions.eventually {
-      assert assetStorageService.find(mapAssetId(gateway.id, assets[0].id, true)) == null
+      assert assetStorageService.find(mapAssetId(gatewayId, assets[0].id, true)) == null
     }
 
     then: "the keycloak client should also be removed"
     assert deleted
     conditions.eventually {
-      assert identityProvider.getClient(managerTestSetup.realmBuildingName, getGatewayClientId(gateway.getId())) == null
+      assert identityProvider.getClient(managerTestSetup.realmBuildingName, getGatewayClientId(gatewayId)) == null
     }
 
     cleanup: "cleanup the gateway client"
@@ -913,22 +991,27 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
       gatewayClient.disconnect()
       gatewayClient.removeAllMessageConsumers()
     }
+    if (rogueGatewayClient != null) {
+      rogueGatewayClient.disconnect()
+      rogueGatewayClient.removeAllMessageConsumers()
+    }
+    if (gateway != null) {
+      assetStorageService.delete([gateway.id])
+    }
   }
 
   def "Verify gateway client service"() {
 
-    given: "the container environment is started"
+    given: "some polling conditions and services from the container"
     def conditions = new PollingConditions(timeout: 30, delay: 0.2)
     def delayedConditions = new PollingConditions(initialDelay: 1, delay: 1, timeout: 10)
-    def container = startContainer(defaultConfig(), defaultServices())
-    def timerService = container.getService(TimerService.class)
     def assetProcessingService = container.getService(AssetProcessingService.class)
     def assetStorageService = container.getService(AssetStorageService.class)
     def gatewayService = container.getService(GatewayService.class)
     def gatewayClientService = container.getService(GatewayClientService.class)
-    def agentService = container.getService(AgentService.class)
     def managerTestSetup = container.getService(SetupService.class).getTaskOfType(ManagerTestSetup.class)
     def clientEventService = container.getService(ClientEventService.class)
+    def originalMicrophone1 = assetStorageService.find(managerTestSetup.microphone1Id)
 
     and: "an authenticated admin user"
     def accessToken = authenticate(
@@ -937,7 +1020,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
             KEYCLOAK_CLIENT_ID,
             MASTER_REALM_ADMIN_USER,
             getString(container.getConfig(), OR_ADMIN_PASSWORD, OR_ADMIN_PASSWORD_DEFAULT)
-            )
+    )
 
 
     and: "the gateway client resource"
@@ -977,7 +1060,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
             null,
             Map.of("test", new GatewayAssetSyncRule()),
             false
-            )
+    )
     gatewayClientResource.setConnection(null, managerTestSetup.realmCityName, gatewayConnection)
 
     then: "the gateway client should become connected"
@@ -1023,7 +1106,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
     microphone1.setName("Microphone 1 Updated")
     microphone1.addAttributes(
             new Attribute<>("test", NUMBER, 100d)
-            )
+    )
     microphone1 = assetStorageService.merge(microphone1)
 
     then: "the mirrored asset under the gateway should have also been updated"
@@ -1047,7 +1130,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
             .setParentId(managerTestSetup.area1Id)
             .addAttributes(
             new Attribute<>("test", TEXT, "testValue")
-            )
+    )
     microphone2 = assetStorageService.merge(microphone2)
 
     then: "the new asset should have been created in the gateway and also mirrored under the gateway asset"
@@ -1079,7 +1162,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
             new BuildingAsset("UnknownAssetType")
             .setId(UniqueIdentifierGenerator.generateId()),
             null
-            )
+    )
     msgEvent.asset.type = "CustomBuildingAsset"
     gatewayClientService.connectionRealmMap.get(gatewayConnection.getLocalRealm()).sendCentralManagerMessage(msgEvent)
 
@@ -1288,103 +1371,32 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
     }
 
     cleanup: "Remove any subscriptions created"
+    if (gatewayClientResource != null) {
+      gatewayClientResource.deleteConnection(null, managerTestSetup.realmCityName)
+    }
     if (clientEventService != null) {
       clientEventService.removeSubscription(eventConsumer)
     }
     if (gateway != null) {
       assetStorageService.delete([gateway.id])
     }
-  }
-
-  /**
-   * This test requires a manager instance with tunnelling configured, so is manual for now unfortunately.
-   * Change the test url and key path to match the instance to connect to.
-   * Recommended to run profile/dev-proxy.yml profile.
-   */
-  @Ignore
-  def "Verify gateway tunnel factory"() {
-    given: "an ssh private key and the URL of a manager instance with tunnelling configured"
-    def keyPath = Paths.get(System.getProperty("user.home"), ".ssh", "test_key")
-    def tunnelSSHHost = "custom-project-test.openremote.app"
-    def tunnelSSHPort = 2222
-    def tmpDir = new File("tmp")
-    def lockFile = new File(tmpDir, "lock.file")
-
-    and: "an instance of the gateway tunnel factory is created"
-    def container = new Container(Collections.emptyMap(), Collections.emptyList())
-    def conditions = new PollingConditions(timeout: 15, delay: 1)
-    def tunnelFactory = new MINAGatewayTunnelFactory(container.EXECUTOR, Container.SCHEDULED_EXECUTOR, keyPath.toFile(), null)
-    tunnelFactory.start()
-
-    expect: "the SSH client to be ready"
-    conditions.eventually {
-      tunnelFactory.client.isStarted()
+    if (microphone2 != null) {
+      assetStorageService.delete([microphone2.id])
     }
-
-    and: "A configured GatewayTunnelInfo for HTTPS on localhost:443"
-    def tunnelInfo = new GatewayTunnelInfo(Constants.MASTER_REALM,
-            "abcedf123456",
-            GatewayTunnelInfo.Type.HTTPS,
-            "localhost", 443)
-
-    and: "A completion variable for the close callback"
-    AtomicBoolean closed = new AtomicBoolean(false)
-
-    when: "Create session is called"
-    GatewayTunnelSession session = tunnelFactory.createSession(tunnelSSHHost, tunnelSSHPort, tunnelInfo, { t ->
-      closed.set(true)
-    })
-
-    then: "The session connection future should complete successfully"
-    new PollingConditions(timeout: 60).eventually {
-      assert session.getConnectFuture().isDone()
-      assert !session.getConnectFuture().isCompletedExceptionally()
-    }
-
-    then: "we keep the tunnel open for manual testing until lock file is deleted"
-    if (!tmpDir.exists()) {
-      tmpDir.mkdirs()
-    }
-    if (!lockFile.exists()) {
-      lockFile.createNewFile()
-    }
-    getLOG().info("---------------------------------------------------------------------------------")
-    getLOG().info("TEST PAUSED FOR TUNNEL TESTING")
-    getLOG().info("Delete the lock file to continue: ${lockFile.absolutePath}")
-    getLOG().info("Tunnel should be accessible at: gw-54tnxwr2oobjafque1jndh.${tunnelSSHHost}")
-    getLOG().info("---------------------------------------------------------------------------------")
-
-    while (lockFile.exists()) {
-      getLOG().info("Tunnel is open")
-      Thread.sleep(5000)
-    }
-
-    when: "we close the tunnel gracefully"
-    session.disconnect()
-
-    then: "the tunnel should be closed without error"
-    noExceptionThrown()
-
-    cleanup: "cleanup"
-    if (tunnelFactory != null) {
-      tunnelFactory.stop()
+    if (originalMicrophone1 != null) {
+      assetStorageService.merge(originalMicrophone1)
     }
   }
 
   def "Verify GatewayAssetSyncRules"() {
 
-    given: "the container environment is started"
+    given: "some polling conditions and services from the container"
     def conditions = new PollingConditions(timeout: 30, delay: 0.2)
-    def delayedConditions = new PollingConditions(initialDelay: 1, delay: 1, timeout: 10)
-    def container = startContainer(defaultConfig(), defaultServices())
-    def timerService = container.getService(TimerService.class)
     def assetProcessingService = container.getService(AssetProcessingService.class)
     def assetStorageService = container.getService(AssetStorageService.class)
     def gatewayService = container.getService(GatewayService.class)
     def gatewayClientService = container.getService(GatewayClientService.class)
-    def agentService = container.getService(AgentService.class)
     def managerTestSetup = container.getService(SetupService.class).getTaskOfType(ManagerTestSetup.class)
-    def clientEventService = container.getService(ClientEventService.class)
 
     and: "an authenticated admin user"
     def accessToken = authenticate(
@@ -1393,7 +1405,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
             KEYCLOAK_CLIENT_ID,
             MASTER_REALM_ADMIN_USER,
             getString(container.getConfig(), OR_ADMIN_PASSWORD, OR_ADMIN_PASSWORD_DEFAULT)
-            )
+    )
 
     and: "the gateway client resource"
     def gatewayClientResource = getClientApiTarget(serverUri(serverPort), MASTER_REALM, accessToken).proxy(GatewayClientResource.class)
@@ -1440,20 +1452,18 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
               ]).setAddAttributeMeta([
                 "*": new MetaMap([new MetaItem<>(ACCESS_RESTRICTED_READ, true)])
               ]).setExcludeAttributes([Asset.NOTES.name]),
-              "LightAsset" : new GatewayAssetSyncRule().setExcludeAttributeMeta([
+              "LightAsset": new GatewayAssetSyncRule().setExcludeAttributeMeta([
                 "*": [
                   ATTRIBUTE_LINKS.name,
                   ACCESS_PUBLIC_WRITE.name,
                   FORMAT.name
                 ]
               ]).setAddAttributeMeta([
-                "onOff" : new MetaMap([
-                  new MetaItem<>(FORMAT, ValueFormat.BOOLEAN_AS_PRESSED_RELEASED())
-                ])
+                "onOff": new MetaMap([new MetaItem<>(FORMAT, ValueFormat.BOOLEAN_AS_PRESSED_RELEASED())])
               ]).setExcludeAttributes([LightAsset.COLOUR_RGB.name]).setAccessPublicRead(false)
             ] as Map<String, GatewayAssetSyncRule>,
             false
-            )
+    )
     gatewayClientResource.setConnection(null, managerTestSetup.realmCityName, gatewayConnection)
 
     then: "the gateway client should become connected"
@@ -1512,8 +1522,246 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
       assert mirroredLight.getAttribute(Asset.NOTES).isPresent()
       assert !mirroredLight.isAccessPublicRead()
     }
+
+    cleanup: "the gateway connection is removed"
+    if (gatewayClientResource != null) {
+      gatewayClientResource.deleteConnection(null, managerTestSetup.realmCityName)
+    }
   }
 
+  def "Verify GatewayResource realm boundary checks"() {
+    given: "some polling conditions and services from the container"
+    def gatewayService = container.getService(GatewayService.class)
+    def managerTestSetup = container.getService(SetupService.class).getTaskOfType(ManagerTestSetup.class)
+    def identityProvider = container.getService(ManagerIdentityService.class).identityProvider as ManagerKeycloakIdentityProvider
+
+    and: "a user in the building realm holding the tunnel read role the endpoint requires"
+    def tunnelReader = identityProvider.createUpdateUser(
+            managerTestSetup.realmBuildingName,
+            new User().setUsername("gatewayrealmtunnelreader").setEnabled(true),
+            "gatewayrealmtunnelreader",
+            true
+    )
+    identityProvider.updateUserClientRoles(
+            managerTestSetup.realmBuildingName,
+            tunnelReader.id,
+            KEYCLOAK_CLIENT_ID,
+            READ_TUNNELS_ROLE
+    )
+
+    and: "an authenticated session for that user"
+    def accessToken = authenticate(
+            container,
+            managerTestSetup.realmBuildingName,
+            KEYCLOAK_CLIENT_ID,
+            "gatewayrealmtunnelreader",
+            "gatewayrealmtunnelreader"
+    )
+
+    and: "the gateway service resource"
+    def gatewayResource = getClientApiTarget(serverUri(serverPort), managerTestSetup.realmBuildingName, accessToken).proxy(GatewayServiceResource.class)
+
+    when: "a fake tunnel for a fake gateway ID in the smart city realm is injected into the gateway service"
+    gatewayService.@tunnelInfos.put("fake-tunnel-id",
+            new GatewayTunnelInfo(managerTestSetup.realmCityName, "fake-gateway-id", GatewayTunnelInfo.Type.HTTPS, "127.0.0.1", 443)
+    )
+
+    and: "the building user then retrieves the list of tunnels for the fake gateway ID"
+    def activeTunnels = gatewayResource.getGatewayActiveTunnelInfos(null, managerTestSetup.realmBuildingName, "fake-gateway-id")
+
+    then: "the building user should not be able to see any tunnels for the fake gateway ID in the smart city realm"
+    assert activeTunnels.length == 0
+
+    cleanup: "the fake tunnel and the user are removed"
+    if (gatewayService != null) {
+      gatewayService.@tunnelInfos.remove("fake-tunnel-id")
+    }
+    if (tunnelReader != null) {
+      identityProvider.deleteUser(managerTestSetup.realmBuildingName, tunnelReader.id)
+    }
+  }
+
+  def "Verify gateway websocket cannot write attributes outside gateway realm"() {
+    given: "some polling conditions and services from the container"
+    def conditions = new PollingConditions(timeout: 15, delay: 0.2)
+    def assetProcessingService = container.getService(AssetProcessingService.class)
+    def assetStorageService = container.getService(AssetStorageService.class)
+    def gatewayService = container.getService(GatewayService.class)
+    def gatewayClientService = container.getService(GatewayClientService.class)
+    def managerTestSetup = container.getService(SetupService.class).getTaskOfType(ManagerTestSetup.class)
+
+    and: "a target asset exists in another realm"
+    def crossRealmTarget = new ThingAsset("Cross realm target")
+            .setRealm(managerTestSetup.realmCityName)
+            .addAttributes(new Attribute<>("test", TEXT, "original"))
+    crossRealmTarget = assetStorageService.merge(crossRealmTarget)
+
+    when: "a gateway is provisioned in the building realm and the city realm"
+    GatewayAsset gateway = assetStorageService.merge(new GatewayAsset("Attacker controlled gateway")
+            .setRealm(managerTestSetup.realmBuildingName))
+    GatewayAsset cityGateway = assetStorageService.merge(new GatewayAsset("Cross realm gateway")
+            .setRealm(managerTestSetup.realmCityName))
+
+    then: "the gateway service account credentials are stored on the gateway assets"
+    conditions.eventually {
+      gateway = assetStorageService.find(gateway.getId(), true) as GatewayAsset
+      cityGateway = assetStorageService.find(cityGateway.getId(), true) as GatewayAsset
+      assert !isNullOrEmpty(gateway.getClientId().orElse(null))
+      assert !isNullOrEmpty(gateway.getClientSecret().orElse(null))
+      assert !isNullOrEmpty(cityGateway.getClientId().orElse(null))
+      assert !isNullOrEmpty(cityGateway.getClientSecret().orElse(null))
+    }
+
+    when: "a gateway client connector is created to connect the city realm to the building realm gateway"
+    def gatewayConnection = new GatewayConnection(
+            managerTestSetup.realmCityName,
+            "127.0.0.1",
+            serverPort,
+            managerTestSetup.realmBuildingName,
+            gateway.getClientId().orElse(""),
+            gateway.getClientSecret().orElse(""),
+            false,
+            null,
+            Map.of("test", new GatewayAssetSyncRule()),
+            false
+    )
+    gatewayClientService.setConnection(gatewayConnection)
+
+    then: "the gateway client connector should be created"
+    conditions.eventually {
+      assert gatewayClientService.connectionRealmMap.get(managerTestSetup.realmCityName) != null
+    }
+
+    and: "the gateway initial sync should complete"
+    conditions.eventually {
+      def connector = gatewayService.gatewayConnectorMap.get(gateway.getId().toLowerCase(Locale.ROOT))
+      assert connector != null
+      assert connector.connected
+      assert !connector.initialSyncInProgress
+    }
+
+    and: "the gateway asset connection status should become connected"
+    conditions.eventually {
+      gateway = assetStorageService.find(gateway.getId(), true) as GatewayAsset
+      assert gateway.getGatewayStatus().orElse(null) == ConnectionStatus.CONNECTED
+    }
+
+    when: "the gateway sends an attribute event using the mapped ID of the cross-realm target"
+    def mappedTargetId = mapAssetId(gateway.id, crossRealmTarget.id, true)
+
+    gatewayClientService.connectionRealmMap
+            .get(managerTestSetup.realmCityName)
+            .sendCentralManagerMessage(new AttributeEvent(mappedTargetId, "test", "crossRealmWrite"))
+
+    then: "the cross-realm target asset must not be modified after some time"
+    new PollingConditions(initialDelay: 5).eventually {
+      def reloadedTarget = assetStorageService.find(crossRealmTarget.id, true)
+      assert reloadedTarget != null
+      assert reloadedTarget.getAttribute("test").flatMap {
+        it.getValue()
+      }.orElse(null) == "original"
+    }
+
+    when: "the gateway sends an attribute event using the mapped ID of a cross realm gateway asset to update the client secret"
+    def mappedGatewayId = mapAssetId(gateway.id, cityGateway.id, true)
+
+    gatewayClientService.connectionRealmMap
+            .get(managerTestSetup.realmCityName)
+            .sendCentralManagerMessage(new AttributeEvent(mappedGatewayId, GatewayAsset.CLIENT_SECRET, UUID.randomUUID().toString()))
+
+    then: "the update should not occur"
+    new PollingConditions(initialDelay: 5).eventually {
+      def reloadedTarget = assetStorageService.find(cityGateway.id, true) as GatewayAsset
+      assert reloadedTarget != null
+      assert reloadedTarget.getClientSecret().orElse(null) == cityGateway.getClientSecret().orElse(null)
+    }
+
+    cleanup: "cleanup created assets and websocket client"
+    if (gatewayClientService != null) {
+      gatewayClientService.deleteConnections([managerTestSetup.realmCityName])
+    }
+    if (gateway != null) {
+      assetStorageService.delete([gateway.id])
+    }
+    if (crossRealmTarget != null) {
+      assetStorageService.delete([crossRealmTarget.id])
+    }
+  }
+
+  /**
+   * This test requires a manager instance with tunnelling configured, so is manual for now unfortunately.
+   * Change the test url and key path to match the instance to connect to.
+   * Recommended to run profile/dev-proxy.yml profile.
+   */
+  @Ignore
+  def "Verify gateway tunnel factory"() {
+    given: "an ssh private key and the URL of a manager instance with tunnelling configured"
+    def keyPath = Paths.get(System.getProperty("user.home"), ".ssh", "test_key")
+    def tunnelSSHHost = "custom-project-test.openremote.app"
+    def tunnelSSHPort = 2222
+    def tmpDir = new File("tmp")
+    def lockFile = new File(tmpDir, "lock.file")
+
+    and: "an instance of the gateway tunnel factory is created"
+    def container = new Container(Collections.emptyMap(), Collections.emptyList())
+    def conditions = new PollingConditions(timeout: 15, delay: 1)
+    def tunnelFactory = new MINAGatewayTunnelFactory(container.EXECUTOR, Container.SCHEDULED_EXECUTOR, keyPath.toFile(), null)
+    tunnelFactory.start()
+
+    expect: "the SSH client to be ready"
+    conditions.eventually {
+      tunnelFactory.client.isStarted()
+    }
+
+    and: "A configured GatewayTunnelInfo for HTTPS on 127.0.0.1:443"
+    def tunnelInfo = new GatewayTunnelInfo(Constants.MASTER_REALM,
+            "abcedf123456",
+            GatewayTunnelInfo.Type.HTTPS,
+            "127.0.0.1", 443)
+
+    and: "A completion variable for the close callback"
+    AtomicBoolean closed = new AtomicBoolean(false)
+
+    when: "Create session is called"
+    GatewayTunnelSession session = tunnelFactory.createSession(tunnelSSHHost, tunnelSSHPort, tunnelInfo, { t ->
+      closed.set(true)
+    })
+
+    then: "The session connection future should complete successfully"
+    new PollingConditions(timeout: 60).eventually {
+      assert session.getConnectFuture().isDone()
+      assert !session.getConnectFuture().isCompletedExceptionally()
+    }
+
+    then: "we keep the tunnel open for manual testing until lock file is deleted"
+    if (!tmpDir.exists()) {
+      tmpDir.mkdirs()
+    }
+    if (!lockFile.exists()) {
+      lockFile.createNewFile()
+    }
+    getLOG().info("---------------------------------------------------------------------------------")
+    getLOG().info("TEST PAUSED FOR TUNNEL TESTING")
+    getLOG().info("Delete the lock file to continue: ${lockFile.absolutePath}")
+    getLOG().info("Tunnel should be accessible at: gw-54tnxwr2oobjafque1jndh.${tunnelSSHHost}")
+    getLOG().info("---------------------------------------------------------------------------------")
+
+    while (lockFile.exists()) {
+      getLOG().info("Tunnel is open")
+      Thread.sleep(5000)
+    }
+
+    when: "we close the tunnel gracefully"
+    session.disconnect()
+
+    then: "the tunnel should be closed without error"
+    noExceptionThrown()
+
+    cleanup: "cleanup"
+    if (tunnelFactory != null) {
+      tunnelFactory.stop()
+    }
+  }
 
   /**
    * This test requires a manager instance with tunnelling configured, so is manual for now unfortunately.
@@ -1525,10 +1773,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
   @Ignore
   def "Gateway Tunneling Edge Gateway Integration test"() {
     given: "the container environment is started"
-
     def sshKeyPath = Paths.get("deployment/sish/client/client")
-
-
     def conditions = new PollingConditions(timeout: 6000, delay: 0.2)
     // The port where this test's manager webserver will run. cannot use random ephemeral port because of
     // its randomization, which when generating the gateway tunnel ID, will then generate a different gateway ID each time.
@@ -1540,7 +1785,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
 
     and: "Central Instance information with tunnelling enabled"
 
-    def centralInstanceHostname = "localhost"
+    def centralInstanceHostname = "127.0.0.1"
     def centralInstancePort = 443
     def isCentralInstanceSecure = (centralInstancePort == 443)
     def centralInstanceRealm = managerTestSetup.realmMasterName
@@ -1556,7 +1801,9 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
             KEYCLOAK_CLIENT_ID,
             MASTER_REALM_ADMIN_USER,
             getString(container.getConfig(), OR_ADMIN_PASSWORD, OR_ADMIN_PASSWORD_DEFAULT)
-            )
+    )
+
+    and: "the gateway client resource"
     def gatewayResource = getClientApiTarget(serverUri((isCentralInstanceSecure), centralInstanceHostname, centralInstancePort), MASTER_REALM, accessToken).proxy(GatewayServiceResource.class)
 
     when: "a new gateway client connection is created to connect to the central instance"
@@ -1572,7 +1819,7 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
             null,
             Map.of("test", new GatewayAssetSyncRule()),
             false
-            )
+    )
 
     gatewayClientService.setConnection(gatewayConnection)
 
@@ -1597,13 +1844,12 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
             centralInstanceRealm,
             gatewayAssetId,
             GatewayTunnelInfo.Type.HTTP,
-            "localhost",
+            "127.0.0.1",
             webserverPort)
 
     def centralManagerTunnelInfo = gatewayResource.startTunnel(tunnelInfo)
 
     then: "gateway should have been opened"
-
     conditions.eventually {
       def res = gatewayResource.getAllActiveTunnelInfos(null, centralInstanceRealm)
       print(res)
@@ -1616,15 +1862,14 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
      We can now request `/auth` from the tunnel URL, and the request route would look like this:
      This Groovy test --> Central Instance --> Sish --> Gateway Proxy --> Keycloak/Manager
      For the "Sish --> Gateway Proxy" request to be routed correctly, we need to edit our local `/etc/hosts` file
-     to route the <tunnelid>.<tunnelSSHHost> to localhost, like this:
-     127.0.0.1       gw-5fj1sxvwwfp7wvgqgve91n.localhost
+     to route the <tunnelid>.<tunnelSSHHost> to 127.0.0.2, like this:
+     127.0.0.1       gw-5fj1sxvwwfp7wvgqgve91n.127.0.0.1
      If that is setup, the request correctly routes through the tunnel to the gateway, and we can request the edge manager.
      To assert proper connectivity, we are going to request a new admin token from the tunnel URL to make sure the
      Keycloak connection works, but also request the server info, which proves that the request has reached the manager
      webserver.
      * */
     and: "We request a new admin token from the tunnel URL"
-
     def token = authenticate(true,
             centralManagerTunnelInfo.id + "." + centralManagerTunnelInfo.hostname,
             MASTER_REALM,
@@ -1646,7 +1891,6 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
     then: "The request should be successful"
     conditions.eventually {
       def info = target.proxy(StatusResource.class).getInfo()
-
       assert info != null
       assert info.size() > 0
     }
@@ -1667,6 +1911,11 @@ class GatewayTest extends Specification implements ManagerContainerTrait {
     then: "The tunnel should be closed automatically by the gateway"
     conditions.eventually {
       assert gatewayClientService.tunnelAutoCloseTasks.mappingCount() == 0
+    }
+
+    cleanup: "the gateway connection is removed"
+    if (gatewayResource != null) {
+      gatewayResource.deleteConnection(null, managerTestSetup.realmCityName)
     }
   }
 }

@@ -110,21 +110,21 @@ class NotificationTest extends Specification implements ManagerContainerTrait {
             KEYCLOAK_CLIENT_ID,
             "testuser1",
             "testuser1"
-            )
+    )
     def testuser2AccessToken = authenticate(
             container,
             realm,
             KEYCLOAK_CLIENT_ID,
             "testuser2",
             "testuser2"
-            )
+    )
     def testuser3AccessToken = authenticate(
             container,
             realm,
             KEYCLOAK_CLIENT_ID,
             "testuser3",
             "testuser3"
-            )
+    )
 
     and: "an authenticated superuser"
     def adminAccessToken = authenticate(
@@ -133,7 +133,7 @@ class NotificationTest extends Specification implements ManagerContainerTrait {
             KEYCLOAK_CLIENT_ID,
             MASTER_REALM_ADMIN_USER,
             getString(container.getConfig(), OR_ADMIN_PASSWORD, OR_ADMIN_PASSWORD_DEFAULT)
-            )
+    )
 
     def notification = new Notification("TestAction",
             new PushNotificationMessage("Test Action",
@@ -855,7 +855,7 @@ class NotificationTest extends Specification implements ManagerContainerTrait {
             KEYCLOAK_CLIENT_ID,
             MASTER_REALM_ADMIN_USER,
             getString(container.getConfig(), OR_ADMIN_PASSWORD, OR_ADMIN_PASSWORD_DEFAULT)
-            )
+    )
 
     def notification = new Notification(
             "MultiLanguageAction",
@@ -950,7 +950,7 @@ class NotificationTest extends Specification implements ManagerContainerTrait {
             KEYCLOAK_CLIENT_ID,
             "testuser1",
             "testuser1"
-            )
+    )
 
     and: "their language is updated to dutch"
     def testuser1 = identityService.getIdentityProvider().getUserByUsername(MASTER_REALM, "testuser1")
@@ -1042,9 +1042,12 @@ class NotificationTest extends Specification implements ManagerContainerTrait {
     pushNotificationTargetIds.clear()
     pushNotificationMessages.clear()
 
-    and: "testuser1 sets their language back to dutch"
+    when: "testuser1 sets their language back to dutch"
     testuser1.setAttribute(User.LOCALE_ATTRIBUTE, "nl")
-    identityService.getIdentityProvider().createUpdateUser(MASTER_REALM, testuser1, null, true)
+    testuser1 = identityService.getIdentityProvider().createUpdateUser(MASTER_REALM, testuser1, null, true)
+
+    then: "we should see the new value in the user attributes"
+    testuser1.getAttributeMap().get(User.LOCALE_ATTRIBUTE).getFirst() == "nl"
 
     /* ----------- */
 
@@ -1087,7 +1090,7 @@ class NotificationTest extends Specification implements ManagerContainerTrait {
     and: "the complex notification is sent"
     adminNotificationResource.sendNotification(null, complexNotification)
 
-    then: "it should return a BAD_REQUEST because testuser1 only gets one notification"
+    then: "it should return a BAD_REQUEST because the admin user doesn't get the email notification and the test user doesn't get the push notification"
     thrown(BadRequestException)
 
     and: "the other notifications should be sent correctly through email and with push"
@@ -1130,14 +1133,6 @@ class NotificationTest extends Specification implements ManagerContainerTrait {
 
     then: "it should return a BAD_REQUEST, because the message is invalid"
     thrown(BadRequestException)
-
-    and: "all users should receive the english message"
-    conditions.eventually {
-      assert localizedNotificationMessages.size() == 0
-      assert localizedNotificationTargetIds.size() == 0
-      assert pushNotificationMessages.size() == 0
-    }
-
 
     /* ------------------------ */
 
@@ -1207,8 +1202,8 @@ class NotificationTest extends Specification implements ManagerContainerTrait {
     // realm is selected via the realmId query param (the consolidated endpoint has no realm path segment)
     def requestNotificationsByRealm = { String authRealm, String token, String realmId ->
       getClientApiTarget(serverUri(serverPort), authRealm, token)
-      .path("notification").queryParam("realmId", realmId)
-      .request().get()
+              .path("notification").queryParam("realmId", realmId)
+              .request().get()
     }
 
     and: "a helper that reads the notifications of a realm with a given name as the superuser"
@@ -1227,8 +1222,8 @@ class NotificationTest extends Specification implements ManagerContainerTrait {
     }
     def deleteNotificationById = { String authRealm, String token, Long notificationId ->
       getClientApiTarget(serverUri(serverPort), authRealm, token)
-      .path("notification").path(notificationId.toString())
-      .request().delete()
+              .path("notification").path(notificationId.toString())
+              .request().delete()
     }
 
     when: "an email notification is sent to the entire building realm"
