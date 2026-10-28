@@ -18,6 +18,9 @@
  */
 package org.openremote.model.query
 
+import com.fasterxml.jackson.annotation.JsonValue
+import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.databind.JsonMappingException
 import org.openremote.model.query.filter.*
 import org.openremote.model.util.ValueUtil
 import spock.lang.Specification
@@ -138,6 +141,208 @@ class AssetQueryCopyTest extends Specification {
     copied.time.time == 1800000000000L
     copied.tree.get("value").intValue() == 1
     copied.counter.get() == 7
+  }
+
+  def "Copying an array predicate supports a non-Serializable record in #shape"() {
+    given: "the payload is accepted by the same JSON conversion used by asset storage"
+    def record = new Reading("original", ["first"], [] as Object[], null,
+    new BigDecimal("1234567890.123456789"))
+    assert record.class.record
+    assert !(record instanceof Serializable)
+    def payload = wrap(record)
+    def expectedJson = ValueUtil.asJSON(payload).orElseThrow()
+    def original = new AssetQuery().attributes(
+            new AttributePredicate("readings", new ArrayPredicate(payload, null, null, null, null, false)))
+
+    when:
+    def copiedPayload = new AssetQuery(original).attributes.items[0].value.value
+    def copiedRecord = unwrap(copiedPayload)
+
+    then: "copying retains the record type, filter representation and values"
+    copiedPayload.getClass() == payload.getClass()
+    copiedRecord instanceof Reading
+    !copiedRecord.is(record)
+    !copiedRecord.tags().is(record.tags())
+    !copiedRecord.empty().is(record.empty())
+    copiedRecord.empty().length == 0
+    copiedRecord.absent() == null
+    copiedRecord.amount() == new BigDecimal("1234567890.123456789")
+    ValueUtil.asJSON(copiedPayload).orElseThrow() == expectedJson
+
+    when: "the caller changes a mutable record component after the copy"
+    record.tags().add("caller edit")
+
+    then:
+    copiedRecord.tags() == ["first"]
+    ValueUtil.asJSON(copiedPayload).orElseThrow() == expectedJson
+
+    when: "the copied component is changed independently"
+    copiedRecord.tags().add("copy edit")
+
+    then:
+    record.tags() == ["first", "caller edit"]
+
+    where:
+    shape | wrap | unwrap
+    "the value itself" | { it } | { it }
+    "a list" | { [it] } | { it[0] }
+    "a map" | { [reading: it] } | { it.reading }
+    "a typed array" | { [it] as Reading[] } | { it[0] }
+  }
+
+  def "Copying an array predicate supports a non-Serializable mutable object"() {
+    given:
+    def payload = new MutableReading(label: "original", tags: ["first"])
+    assert !(payload instanceof Serializable)
+    def expectedJson = ValueUtil.asJSON(payload).orElseThrow()
+    def original = new AssetQuery().attributes(
+            new AttributePredicate("readings", new ArrayPredicate(payload, null, null, null, null, false)))
+
+    when:
+    def copied = new AssetQuery(original).attributes.items[0].value.value
+
+    then:
+    copied instanceof MutableReading
+    !copied.is(payload)
+    !copied.tags.is(payload.tags)
+    ValueUtil.asJSON(copied).orElseThrow() == expectedJson
+
+    when:
+    payload.label = "next"
+    payload.tags.add("caller edit")
+
+    then:
+    copied.label == "original"
+    copied.tags == ["first"]
+    ValueUtil.asJSON(copied).orElseThrow() == expectedJson
+  }
+
+  def "Copying an array predicate preserves a serialization-only payload in #shape for database queries"() {
+    given: "storage only requires JSON serialization, not reconstruction of the original class"
+    def payload = new SerializationOnlyReading("original", ["first"])
+    assert !(payload instanceof Serializable)
+    def payloadJson = ValueUtil.asJSON(payload).orElseThrow()
+    assert ValueUtil.JSON.readTree(payloadJson) == ValueUtil.JSON.readTree(
+    '{"label":"original","tags":["first"]}')
+    payload.contents.amount = new BigDecimal("1234567890.123456789")
+    def value = wrap(payload)
+    def expectedJson = ValueUtil.asJSON(value).orElseThrow()
+    def original = new AssetQuery().attributes(
+            new AttributePredicate("readings", new ArrayPredicate(value, null, null, null, null, false)))
+
+    when: "Jackson is asked to reconstruct the payload's original class"
+    ValueUtil.JSON.readValue(payloadJson, SerializationOnlyReading)
+
+    then: "a same-class JSON round trip cannot copy this otherwise valid database payload"
+    thrown(JsonMappingException)
+
+    when:
+    def copied = new AssetQuery(original).attributes.items[0].value.value
+
+    then: "the copied payload produces the same database filter without requiring its original type"
+    copied != null
+    !copied.is(payload)
+    ValueUtil.JSON.readTree(ValueUtil.asJSON(copied).orElseThrow()) == ValueUtil.JSON.readTree(expectedJson)
+    ValueUtil.asJSON(copied).orElseThrow().contains('"amount":1234567890.123456789')
+
+    when:
+    payload.contents.label = "next"
+    payload.contents.tags.add("caller edit")
+    payload.contents.amount = 0
+
+    then:
+    ValueUtil.JSON.readTree(ValueUtil.asJSON(copied).orElseThrow()) == ValueUtil.JSON.readTree(expectedJson)
+    ValueUtil.asJSON(copied).orElseThrow().contains('"amount":1234567890.123456789')
+
+    where:
+    shape | wrap
+    "the value itself" | { it }
+    "a nested collection" | { [readings: [it]] }
+    "a typed array" | { [it] as SerializationOnlyReading[] }
+  }
+
+  def "Copying an array predicate supports a Serializable object containing a non-Serializable record"() {
+    given:
+    def payload = new ReadingEnvelope(reading: new Reading("original", ["first"], [] as Object[], null,
+    new BigDecimal("1234567890.123456789")))
+    def expectedJson = ValueUtil.asJSON(payload).orElseThrow()
+    def original = new AssetQuery().attributes(
+            new AttributePredicate("readings", new ArrayPredicate(payload, null, null, null, null, false)))
+
+    when:
+    def copied = new AssetQuery(original).attributes.items[0].value.value
+    payload.reading.tags().add("caller edit")
+
+    then:
+    copied instanceof ReadingEnvelope
+    copied.reading.tags() == ["first"]
+    copied.reading.empty().length == 0
+    ValueUtil.asJSON(copied).orElseThrow() == expectedJson
+  }
+
+  static record Reading(String label, List<String> tags, Object[] empty, String absent, BigDecimal amount) {}
+
+  def "Copying an array predicate does not silently discard read-only JSON properties"() {
+    given:
+    def payload = new ReadOnlyReading(label: "original")
+    def expectedJson = ValueUtil.asJSON(payload).orElseThrow()
+    assert ValueUtil.JSON.readValue(expectedJson, ReadOnlyReading).label == null
+    def original = new AssetQuery().attributes(
+            new AttributePredicate("readings", new ArrayPredicate(payload, null, null, null, null, false)))
+
+    when:
+    def copied = new AssetQuery(original).attributes.items[0].value.value
+    payload.label = "next"
+
+    then:
+    ValueUtil.asJSON(copied).orElseThrow() == expectedJson
+  }
+
+  def "Copying an array predicate rejects a payload that cannot be serialized instead of removing its filter"() {
+    given:
+    def predicate = new ArrayPredicate(new InvalidReading(), null, null, null, null, false)
+    def original = new AssetQuery().attributes(new AttributePredicate("readings", predicate))
+
+    when:
+    new AssetQuery(original)
+
+    then:
+    thrown(IllegalArgumentException)
+    predicate.value instanceof InvalidReading
+  }
+
+  static class ReadOnlyReading {
+    @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+    String label
+  }
+
+  static class InvalidReading {
+    @JsonValue
+    Object jsonValue() {
+      throw new IllegalStateException("Cannot serialize this payload")
+    }
+  }
+
+  static class MutableReading {
+    String label
+    List<String> tags
+  }
+
+  static class ReadingEnvelope implements Serializable {
+    Reading reading
+  }
+
+  static class SerializationOnlyReading {
+    final Map<String, Object> contents
+
+    SerializationOnlyReading(String label, List<String> tags) {
+      contents = [label: label, tags: tags]
+    }
+
+    @JsonValue
+    Map<String, Object> jsonValue() {
+      contents
+    }
   }
 
   static class ExtendedStringPredicate extends StringPredicate {

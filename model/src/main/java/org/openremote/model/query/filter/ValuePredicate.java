@@ -18,9 +18,14 @@
  */
 package org.openremote.model.query.filter;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import java.io.IOException;
 import java.io.Serializable;
 import java.lang.reflect.Array;
 import java.math.BigDecimal;
@@ -36,6 +41,8 @@ import java.util.Set;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.hibernate.internal.util.SerializationHelper;
+import org.hibernate.type.SerializationException;
+import org.openremote.model.util.ValueUtil;
 
 @JsonSubTypes({
   @JsonSubTypes.Type(value = StringPredicate.class, name = StringPredicate.name),
@@ -55,7 +62,11 @@ import org.hibernate.internal.util.SerializationHelper;
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "predicateType")
 public abstract class ValuePredicate implements Serializable {
 
-  /** Copies a predicate and its mutable values, retaining their types and null/empty values. */
+  /**
+   * Copies a predicate and its mutable values, retaining their types and null/empty values where
+   * possible. Array payloads that cannot be reconstructed use an independent JSON snapshot for
+   * database filtering; such snapshots do not retain Java object equality for in-memory predicates.
+   */
   public static ValuePredicate copy(ValuePredicate source) {
     return switch (source) {
       case null -> null;
@@ -77,7 +88,7 @@ public abstract class ValuePredicate implements Serializable {
       }
       case ArrayPredicate p when p.getClass() == ArrayPredicate.class ->
           new ArrayPredicate(
-              copyValue(p.value),
+              copyArrayValue(p.value),
               p.index,
               p.lengthEquals,
               p.lengthGreaterThan,
@@ -143,9 +154,70 @@ public abstract class ValuePredicate implements Serializable {
       set.forEach(item -> result.add(copyValue(item)));
       return result;
     }
-    if (value instanceof Serializable serializable) return SerializationHelper.clone(serializable);
-    throw new IllegalArgumentException(
-        "Cannot copy predicate value of type: " + value.getClass().getName());
+    if (value instanceof Serializable serializable) {
+      try {
+        return SerializationHelper.clone(serializable);
+      } catch (SerializationException e) {
+        // A Serializable wrapper can contain non-Serializable payloads, including records.
+      }
+    }
+    try {
+      Object result =
+          PayloadMapper.JSON.readValue(
+              PayloadMapper.JSON.writeValueAsBytes(value), value.getClass());
+      // Deserializers can silently discard properties. Never change the database filter that way.
+      if (result != null && databaseJson(value).equals(databaseJson(result))) return result;
+      throw new IllegalArgumentException(
+          "Copy changed predicate value of type: " + value.getClass());
+    } catch (IOException e) {
+      throw new IllegalArgumentException(
+          "Cannot copy predicate value of type: " + value.getClass().getName(), e);
+    }
+  }
+
+  private static Object copyArrayValue(Object value) {
+    try {
+      return copyValue(value);
+    } catch (IllegalArgumentException e) {
+      // Storage accepts JSON-serializable values even without a matching deserializer. Snapshot the
+      // whole payload so nested values and typed arrays do not require incompatible element types.
+      try {
+        return databaseJson(value);
+      } catch (IOException snapshotFailure) {
+        snapshotFailure.addSuppressed(e);
+        throw new IllegalArgumentException(
+            "Cannot copy array predicate value of type: " + value.getClass().getName(),
+            snapshotFailure);
+      }
+    }
+  }
+
+  private static JsonNode databaseJson(Object value) throws IOException {
+    // Use storage's serialization settings, preserving precision when reading the snapshot.
+    return ValueUtil.JSON
+        .reader()
+        .with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+        .readTree(ValueUtil.JSON.writeValueAsBytes(value));
+  }
+
+  private static class PayloadMapper {
+    // Initialize lazily: the normal explicit copies do not need Jackson or ValueUtil
+    // initialization.
+    private static final ObjectMapper JSON = createMapper();
+
+    private static ObjectMapper createMapper() {
+      ObjectMapper mapper =
+          ValueUtil.JSON
+              .copy()
+              .setSerializationInclusion(JsonInclude.Include.ALWAYS)
+              .enable(SerializationFeature.WRITE_EMPTY_JSON_ARRAYS)
+              .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+      mapper
+          .configOverride(Map.class)
+          .setInclude(
+              JsonInclude.Value.construct(JsonInclude.Include.ALWAYS, JsonInclude.Include.ALWAYS));
+      return mapper;
+    }
   }
 
   public static Predicate<Object> asPredicateOrTrue(
