@@ -41,19 +41,7 @@ class AssetsFacadeQueryTest extends Specification {
     def original = queryState(query)
     def engine = engineFor(scope)
     List<Map> submittedStates = []
-    def storage = Stub(AssetStorageService) {
-      findAll(_ as AssetQuery) >> { AssetQuery submitted ->
-        submittedStates.add(queryState(submitted))
-        // The real storage query fills in these defaults in place.
-        if (submitted.access == null) {
-          submitted.access = AssetQuery.Access.PRIVATE
-        }
-        if (submitted.orderBy == null && submitted.ids == null) {
-          submitted.orderBy = new AssetQuery.OrderBy(AssetQuery.OrderBy.Property.CREATED_ON)
-        }
-        []
-      }
-    }
+    def storage = capturingStorage(submittedStates)
 
     when:
     facadeFor(engine, storage).getResults(query).toList()
@@ -81,12 +69,7 @@ class AssetsFacadeQueryTest extends Specification {
       new RulesEngineId()
     ]
     List<Map> submittedStates = []
-    def storage = Stub(AssetStorageService) {
-      findAll(_ as AssetQuery) >> { AssetQuery submitted ->
-        submittedStates.add(queryState(submitted))
-        []
-      }
-    }
+    def storage = capturingStorage(submittedStates)
 
     when:
     engines.each { facadeFor(it, storage).getResults(query).toList() }
@@ -108,13 +91,7 @@ class AssetsFacadeQueryTest extends Specification {
     def engine = engineFor(scope)
     List<AssetQuery> submittedQueries = []
     List<Map> submittedStates = []
-    def storage = Stub(AssetStorageService) {
-      findAll(_ as AssetQuery) >> { AssetQuery submitted ->
-        submittedQueries.add(submitted)
-        submittedStates.add(queryState(submitted))
-        []
-      }
-    }
+    def storage = capturingStorage(submittedStates, submittedQueries)
     def facade = facadeFor(engine, storage)
     facade.getResults(query).toList()
     def firstExecution = queryState(submittedQueries[0])
@@ -155,16 +132,11 @@ class AssetsFacadeQueryTest extends Specification {
     given: "empty arrays must remain distinct from absent filters"
     def query = new AssetQuery(
             ids: [] as String[], names: [] as StringPredicate[], parents: [] as ParentPredicate[],
-            userIds: [] as String[], types: [] as String[])
+            paths: [] as PathPredicate[], userIds: [] as String[], types: [] as String[])
     def original = queryState(query)
     def engine = engineFor(scope)
     List<Map> submittedStates = []
-    def storage = Stub(AssetStorageService) {
-      findAll(_ as AssetQuery) >> { AssetQuery submitted ->
-        submittedStates.add(queryState(submitted))
-        []
-      }
-    }
+    def storage = capturingStorage(submittedStates)
 
     when:
     facadeFor(engine, storage).getResults(query).toList()
@@ -210,6 +182,27 @@ class AssetsFacadeQueryTest extends Specification {
     copied.previousValue.value == new BigDecimal("1234567890.123456789")
   }
 
+  private AssetStorageService capturingStorage(List<Map> submittedStates, List<AssetQuery> submittedQueries = []) {
+    def capture = { AssetQuery submitted, PathPredicate requiredPath ->
+      submittedStates.add(queryState(submitted) + [requiredPath: requiredPath?.path?.toList()])
+      submittedQueries.add(submitted)
+      // The real storage query fills in these defaults in place.
+      if (submitted.access == null) {
+        submitted.access = AssetQuery.Access.PRIVATE
+      }
+      if (submitted.orderBy == null && submitted.ids == null) {
+        submitted.orderBy = new AssetQuery.OrderBy(AssetQuery.OrderBy.Property.CREATED_ON)
+      }
+      []
+    }
+    Stub(AssetStorageService) {
+      findAll(_ as AssetQuery) >> { AssetQuery submitted -> capture(submitted, null) }
+      findAll(_ as AssetQuery, _ as PathPredicate) >> { AssetQuery submitted, PathPredicate requiredPath ->
+        capture(submitted, requiredPath)
+      }
+    }
+  }
+
   private AssetsFacade facadeFor(RulesEngineId engine, AssetStorageService storage) {
     if (engine.assetId.present) {
       def scopedAsset = Stub(ThingAsset) {
@@ -252,9 +245,8 @@ class AssetsFacadeQueryTest extends Specification {
   }
 
   private static Map scopedState(Map original, RulesEngineId engine) {
-    // Capture current execution semantics. Combining caller paths with engine scope is #3479.
     original + [realm: engine.realm.orElse(original.realm),
-      paths: engine.assetId.present ? [[engine.assetId.get()]] : original.paths,
+      requiredPath: engine.assetId.map { [it] }.orElse(null),
       select: [attributes: []]]
   }
 }
