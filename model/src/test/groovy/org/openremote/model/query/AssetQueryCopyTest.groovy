@@ -21,6 +21,7 @@ package org.openremote.model.query
 import com.fasterxml.jackson.annotation.JsonValue
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.JsonMappingException
+import org.hibernate.internal.util.SerializationHelper
 import org.openremote.model.query.filter.*
 import org.openremote.model.util.ValueUtil
 import spock.lang.Specification
@@ -298,6 +299,53 @@ class AssetQueryCopyTest extends Specification {
     ValueUtil.asJSON(copied).orElseThrow() == expectedJson
   }
 
+  def "Copying an array predicate preserves JSON-visible transient state in #shape"() {
+    given: "Java serialization loses a field that contributes to the database predicate"
+    def reading = new TransientReading("active")
+    assert ValueUtil.asJSON(reading).orElseThrow() == '{"label":"active"}'
+    def payload = wrap(reading)
+    def expectedJson = ValueUtil.asJSON(payload).orElseThrow()
+    assert ValueUtil.asJSON(SerializationHelper.clone(payload)).orElseThrow() != expectedJson
+    def original = new AssetQuery().attributes(
+            new AttributePredicate("readings", new ArrayPredicate(payload, null, null, null, null, false)))
+
+    when:
+    def copied = new AssetQuery(original).attributes.items[0].value.value
+
+    then: "the copied query keeps the original JSON containment filter"
+    ValueUtil.asJSON(copied).orElseThrow() == expectedJson
+
+    when: "the caller changes the transient field after copying"
+    reading.changeLabel("next")
+
+    then:
+    ValueUtil.asJSON(copied).orElseThrow() == expectedJson
+
+    where:
+    shape | wrap
+    "the value itself" | { it }
+    "a nested collection" | { [readings: [it]] }
+    "a typed array" | { [it] as TransientReading[] }
+    "a Serializable wrapper" | { new TransientReadingEnvelope(reading: it) }
+  }
+
+  def "Copying an array predicate does not drop a payload whose Java deserialization returns null"() {
+    given:
+    def payload = new NullResolvingReading("active")
+    assert SerializationHelper.clone(payload) == null
+    def expectedJson = ValueUtil.asJSON(payload).orElseThrow()
+    assert expectedJson == '{"label":"active"}'
+    def original = new AssetQuery().attributes(
+            new AttributePredicate("readings", new ArrayPredicate(payload, null, null, null, null, false)))
+
+    when:
+    def copied = new AssetQuery(original).attributes.items[0].value.value
+
+    then: "null must not turn the containment filter into an unrestricted predicate"
+    copied != null
+    ValueUtil.asJSON(copied).orElseThrow() == expectedJson
+  }
+
   def "Copying an array predicate rejects a payload that cannot be serialized instead of removing its filter"() {
     given:
     def predicate = new ArrayPredicate(new InvalidReading(), null, null, null, null, false)
@@ -314,6 +362,37 @@ class AssetQueryCopyTest extends Specification {
   static class ReadOnlyReading {
     @JsonProperty(access = JsonProperty.Access.READ_ONLY)
     String label
+  }
+
+  static class TransientReading implements Serializable {
+    private transient String label
+
+    TransientReading(String label) {
+      this.label = label
+    }
+
+    @JsonProperty
+    String getLabel() {
+      label
+    }
+
+    void changeLabel(String label) {
+      this.label = label
+    }
+  }
+
+  static class TransientReadingEnvelope implements Serializable {
+    TransientReading reading
+  }
+
+  static class NullResolvingReading extends TransientReading {
+    NullResolvingReading(String label) {
+      super(label)
+    }
+
+    private Object readResolve() {
+      null
+    }
   }
 
   static class InvalidReading {

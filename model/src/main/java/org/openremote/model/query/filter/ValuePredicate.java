@@ -156,9 +156,10 @@ public abstract class ValuePredicate implements Serializable {
     }
     if (value instanceof Serializable serializable) {
       try {
-        return SerializationHelper.clone(serializable);
-      } catch (SerializationException e) {
-        // A Serializable wrapper can contain non-Serializable payloads, including records.
+        Object result = SerializationHelper.clone(serializable);
+        if (hasSameDatabaseValue(value, result)) return result;
+      } catch (SerializationException | IOException e) {
+        // A Serializable payload may need Jackson to preserve its database representation.
       }
     }
     try {
@@ -166,7 +167,7 @@ public abstract class ValuePredicate implements Serializable {
           PayloadMapper.JSON.readValue(
               PayloadMapper.JSON.writeValueAsBytes(value), value.getClass());
       // Deserializers can silently discard properties. Never change the database filter that way.
-      if (result != null && databaseJson(value).equals(databaseJson(result))) return result;
+      if (hasSameDatabaseValue(value, result)) return result;
       throw new IllegalArgumentException(
           "Copy changed predicate value of type: " + value.getClass());
     } catch (IOException e) {
@@ -198,6 +199,11 @@ public abstract class ValuePredicate implements Serializable {
         .reader()
         .with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
         .readTree(ValueUtil.JSON.writeValueAsBytes(value));
+  }
+
+  private static boolean hasSameDatabaseValue(Object original, Object copy) throws IOException {
+    // Java serialization can lose transient state; Jackson deserializers can discard properties.
+    return copy != null && databaseJson(original).equals(databaseJson(copy));
   }
 
   private static class PayloadMapper {
