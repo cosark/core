@@ -30,9 +30,9 @@ import java.sql.Timestamp;
 import java.text.DateFormat;
 import java.time.Instant;
 import java.util.*;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 import org.apache.camel.builder.RouteBuilder;
 import org.hibernate.Session;
 import org.openremote.container.message.MessageBrokerService;
@@ -189,7 +189,11 @@ public class AlarmService extends RouteBuilder implements ContainerService {
     }
   }
 
-  /** Sends an alarm. Callers are responsible for enforcing realm authorization. */
+  /**
+   * Sends an alarm. Notification recipients and their permissions are resolved before persistence;
+   * notification submission happens afterward. Callers are responsible for enforcing realm
+   * authorization.
+   */
   public SentAlarm sendAlarm(Alarm alarm, List<String> assetIds) {
     Objects.requireNonNull(alarm, "Alarm cannot be null");
     Objects.requireNonNull(alarm.getRealm(), "Alarm realm cannot be null");
@@ -201,6 +205,14 @@ public class AlarmService extends RouteBuilder implements ContainerService {
     if (assetIds != null && !assetIds.isEmpty()) {
       validateAssetsInRealm(alarm.getRealm(), assetIds);
     }
+
+    List<User> notificationUsers =
+        getAlarmNotificationUsers(
+            alarm.getSeverity(),
+            alarm.getRealm(),
+            alarm.getAssigneeId(),
+            () -> assetIds,
+            alarm.getSource() == MANUAL ? Set.of(alarm.getSourceId()) : Set.of());
 
     Instant timestamp = Instant.ofEpochMilli(timerService.getCurrentTimeMillis());
     SentAlarm sentAlarm =
@@ -226,26 +238,20 @@ public class AlarmService extends RouteBuilder implements ContainerService {
     clientEventService.publishEvent(
         new AlarmEvent(alarm.getRealm(), PersistenceEvent.Cause.CREATE));
     if (alarm.getSeverity() == Alarm.Severity.HIGH) {
-      Set<String> excludeUserIds =
-          alarm.getSource() == MANUAL ? Set.of(alarm.getSourceId()) : Set.of();
-      sendAssigneeNotification(sentAlarm, excludeUserIds);
+      sendAssigneeNotification(sentAlarm, notificationUsers);
     }
 
     return sentAlarm;
   }
 
   /**
-   * Sends e-mail and push notifications for an alarm to the alarm assignee. If an assignee is not
-   * set, users in the alarm's realm having the {@link Constants#SUPER_USER_REALM_ROLE} or {@link
-   * Constants#WRITE_ALARMS_ROLE} are notified. Restricted users must have explicit links to every
-   * linked asset; they are not notified for alarms without linked assets.
+   * Submits e-mail and push notifications to recipients resolved before the alarm was persisted.
+   * Submission failures do not roll back the already persisted alarm.
    *
    * @param alarm the alarm to send e-mail and push notifications for
-   * @param excludeUserIds users matching these user IDs are excluded from the notifications
+   * @param users eligible recipients, with exclusions and asset-access checks already applied
    */
-  protected void sendAssigneeNotification(SentAlarm alarm, Set<String> excludeUserIds) {
-    List<User> users = getAlarmNotificationUsers(alarm);
-    users.removeIf(user -> excludeUserIds.contains(user.getId()));
+  protected void sendAssigneeNotification(SentAlarm alarm, List<User> users) {
     if (users.isEmpty()) {
       LOG.fine("No matching users to send alarm notification");
       return;
@@ -289,30 +295,43 @@ public class AlarmService extends RouteBuilder implements ContainerService {
     notificationService.sendNotificationAsync(email, Notification.Source.INTERNAL, "alarms");
   }
 
-  private List<User> getAlarmNotificationUsers(SentAlarm alarm) {
+  /**
+   * Resolves recipients for HIGH alarms before any alarm write. Target assets are loaded only for
+   * unassigned HIGH alarms. Restricted recipients require explicit links to every target asset;
+   * alarms without targets exclude restricted recipients.
+   */
+  private List<User> getAlarmNotificationUsers(
+      Alarm.Severity severity,
+      String realm,
+      String assigneeId,
+      Supplier<List<String>> assetIdsSupplier,
+      Set<String> excludeUserIds) {
+    if (severity != Alarm.Severity.HIGH) return List.of();
+
     ManagerIdentityProvider identityProvider = identityService.getIdentityProvider();
     List<User> users = new ArrayList<>();
-    if (alarm.getAssigneeId() == null) {
+    if (assigneeId == null) {
       UserQuery userQuery =
           new UserQuery()
-              .realm(new RealmPredicate(alarm.getRealm()))
+              .realm(new RealmPredicate(realm))
               .clientRoles(new StringPredicate(Constants.WRITE_ALARMS_ROLE))
               .realmRoles(new StringPredicate(Constants.SUPER_USER_REALM_ROLE))
               .serviceUsers(false);
       users.addAll(Arrays.asList(identityProvider.queryUsers(userQuery)));
-      List<String> assetIds =
-          getAssetLinks(alarm.getId(), alarm.getRealm()).stream()
-              .map(link -> link.getId().getAssetId())
-              .distinct()
-              .toList();
+      users.removeIf(user -> excludeUserIds.contains(user.getId()));
+      List<String> assetIds = assetIdsSupplier.get();
+      List<String> uniqueAssetIds =
+          assetIds == null ? List.of() : assetIds.stream().distinct().toList();
       // Both notification channels include all linked assets, so partial access is insufficient.
       users.removeIf(
           user ->
-              Arrays.asList(identityProvider.getUserRealmRoles(alarm.getRealm(), user.getId()))
+              Arrays.asList(identityProvider.getUserRealmRoles(realm, user.getId()))
                       .contains(Constants.RESTRICTED_USER_REALM_ROLE)
-                  && !assetStorageService.isUserAssets(user.getId(), assetIds));
+                  && !assetStorageService.isUserAssets(user.getId(), uniqueAssetIds));
     } else {
-      users.add(identityProvider.getUser(alarm.getAssigneeId()));
+      if (!excludeUserIds.contains(assigneeId)) {
+        users.add(identityProvider.getUser(assigneeId));
+      }
     }
     return users;
   }
@@ -372,10 +391,25 @@ public class AlarmService extends RouteBuilder implements ContainerService {
     return sb.toString();
   }
 
-  /** Updates an existing alarm. Callers are responsible for enforcing realm authorization. */
+  /**
+   * Updates an existing alarm. Notification recipients and their permissions are resolved before
+   * persistence; notification submission happens afterward. Callers are responsible for enforcing
+   * realm authorization.
+   */
   public void updateAlarm(SentAlarm oldAlarm, SentAlarm newAlarm) {
     String oldAssigneeId = oldAlarm.getAssigneeId();
     String newAssigneeId = newAlarm.getAssigneeId();
+
+    List<User> notificationUsers =
+        getAlarmNotificationUsers(
+            newAlarm.getSeverity(),
+            oldAlarm.getRealm(),
+            newAssigneeId,
+            () ->
+                getAssetLinks(oldAlarm.getId(), oldAlarm.getRealm()).stream()
+                    .map(link -> link.getId().getAssetId())
+                    .toList(),
+            oldAssigneeId == null ? Set.of() : Set.of(oldAssigneeId));
 
     persistenceService.doTransaction(
         entityManager ->
@@ -399,9 +433,7 @@ public class AlarmService extends RouteBuilder implements ContainerService {
         new AlarmEvent(newAlarm.getRealm(), PersistenceEvent.Cause.UPDATE));
 
     if (newAlarm.getSeverity() == Alarm.Severity.HIGH) {
-      Set<String> excludeUserIds =
-          Stream.of(oldAssigneeId).filter(Objects::nonNull).collect(Collectors.toSet());
-      sendAssigneeNotification(getAlarm(oldAlarm.getId()), excludeUserIds);
+      sendAssigneeNotification(getAlarm(oldAlarm.getId()), notificationUsers);
     }
   }
 
